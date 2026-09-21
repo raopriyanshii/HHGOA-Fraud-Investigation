@@ -1,0 +1,51 @@
+// Phase D edge schema. NOT YET EXECUTED -- proposal for review.
+// Run after 01_vertices.gsql. Same HHG_ prefix reasoning as that file.
+//
+// 9 edge types total, matching the Phase C approved model, with one
+// concretization: ClosedCase and InvestigationCase share the same
+// INVOLVES / ON_CARD / CONNECTED_TO edge *types* (GSQL supports multiple
+// FROM/TO pairs on one edge type) rather than four separate near-duplicate
+// edge types, because Phase C's own doc describes InvestigationCase as
+// "same shape as ClosedCase's edges." CITES is the one edge that exists
+// only for InvestigationCase (a live case citing historical precedent --
+// there is no reverse concept for a ClosedCase, which cannot cite anything
+// since it never runs an investigation of its own).
+//
+// HHG_NEXT is declared here (per the approved 9-edge-type model) but no
+// loading job in 04_loading_jobs.gsql populates it -- per the fixed Phase D
+// decision not to materialize a universal NEXT edge; temporal reasoning
+// uses ts-based query-time windows instead until that decision changes.
+
+CREATE DIRECTED EDGE HHG_OWNS (FROM HHG_Customer, TO HHG_Card)
+  WITH REVERSE_EDGE="HHG_OWNS_reverse"
+
+CREATE DIRECTED EDGE HHG_MADE (FROM HHG_Card, TO HHG_Transaction)
+  WITH REVERSE_EDGE="HHG_MADE_reverse"
+
+CREATE DIRECTED EDGE HHG_FROM_DEVICE (FROM HHG_Transaction, TO HHG_DeviceProfile)
+  WITH REVERSE_EDGE="HHG_FROM_DEVICE_reverse"
+
+CREATE DIRECTED EDGE HHG_BILLED_IN (FROM HHG_Transaction, TO HHG_BillingRegion)
+  WITH REVERSE_EDGE="HHG_BILLED_IN_reverse"
+
+// Declared only -- not loaded in Phase D (see comment above).
+CREATE DIRECTED EDGE HHG_NEXT (FROM HHG_Transaction, TO HHG_Transaction)
+
+CREATE DIRECTED EDGE HHG_INVOLVES (
+  FROM HHG_ClosedCase, TO HHG_Transaction | FROM HHG_InvestigationCase, TO HHG_Transaction
+) WITH REVERSE_EDGE="HHG_INVOLVES_reverse"
+
+CREATE DIRECTED EDGE HHG_ON_CARD (
+  FROM HHG_ClosedCase, TO HHG_Card | FROM HHG_InvestigationCase, TO HHG_Card
+) WITH REVERSE_EDGE="HHG_ON_CARD_reverse"
+
+// resolution carries Phase C's two-tier resolution provenance
+// (primary_external_id vs fallback_single_card_customer) as an edge
+// property, so it is never lost or conflated once loaded.
+CREATE DIRECTED EDGE HHG_CONNECTED_TO (
+  FROM HHG_ClosedCase, TO HHG_Card | FROM HHG_InvestigationCase, TO HHG_Card,
+  resolution STRING
+) WITH REVERSE_EDGE="HHG_CONNECTED_TO_reverse"
+
+CREATE DIRECTED EDGE HHG_CITES (FROM HHG_InvestigationCase, TO HHG_ClosedCase)
+  WITH REVERSE_EDGE="HHG_CITES_reverse"

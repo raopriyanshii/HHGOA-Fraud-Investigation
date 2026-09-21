@@ -1,0 +1,25 @@
+// Phase D graph creation. NOT YET EXECUTED -- proposal for review.
+// Run after 01_vertices.gsql and 02_edges.gsql.
+//
+// A brand-new graph, entirely separate from Transaction_Fraud. Creating
+// this graph does not touch, lock, or reference Transaction_Fraud in any
+// way -- GSQL graphs are independent containers over a shared type catalog,
+// and this one only lists HHG_-prefixed types.
+
+CREATE GRAPH HHGOA_FraudInvestigation (
+  HHG_Customer, HHG_Card, HHG_Transaction, HHG_DeviceProfile, HHG_BillingRegion,
+  HHG_ClosedCase, HHG_InvestigationCase,
+  HHG_OWNS, HHG_OWNS_reverse,
+  HHG_MADE, HHG_MADE_reverse,
+  HHG_FROM_DEVICE, HHG_FROM_DEVICE_reverse,
+  HHG_BILLED_IN, HHG_BILLED_IN_reverse,
+  HHG_NEXT,
+  HHG_INVOLVES, HHG_INVOLVES_reverse,
+  HHG_ON_CARD, HHG_ON_CARD_reverse,
+  HHG_CONNECTED_TO, HHG_CONNECTED_TO_reverse,
+  HHG_CITES, HHG_CITES_reverse
+)
+
+// After this runs successfully, .env's TG_GRAPH_NAME should be switched
+// from "Transaction_Fraud" (used only for the earlier auth smoke test)
+// to "HHGOA_FraudInvestigation" for all further work in this project.

@@ -1,0 +1,165 @@
+// Phase D vertex schema for the HHGOA fraud investigation project.
+// NOT YET EXECUTED -- proposal for review.
+//
+// All type names are prefixed HHG_ because `gsql ls` on this server showed
+// the global catalog (shared across ALL graphs, including the existing
+// Transaction_Fraud) already defines a vertex type literally named `Card`
+// (plus Party, Account, Device, Merchant, Cases, etc.). GSQL vertex/edge
+// type names are server-wide, not per-graph, so a bare `CREATE VERTEX Card`
+// would collide with Transaction_Fraud's existing, unrelated Card type.
+// The HHG_ prefix is applied to every type for consistency, not just the
+// one that collided, so there is no ambiguity in any future `ls` listing
+// and zero risk of ever touching Transaction_Fraud's schema.
+//
+// Property choices carried over unchanged from data/processed/graph_data_model.md
+// (Card identity = customer_id+card1; card6_conflict stays visible; etc.)
+// plus decisions this phase had to make concrete -- see docs/TIGERGRAPH_SCHEMA.md
+// for the reasoning behind every STRING-vs-numeric choice below.
+
+CREATE VERTEX HHG_Customer (
+  PRIMARY_ID customer_id STRING,
+  n_cards UINT,
+  first_seen_ts DATETIME,
+  last_seen_ts DATETIME,
+  total_transaction_count UINT
+) WITH PRIMARY_ID_AS_ATTRIBUTE="true"
+
+CREATE VERTEX HHG_Card (
+  PRIMARY_ID card_key STRING,
+  customer_id STRING,
+  card1 UINT,
+  card4 STRING,
+  card4_conflict BOOL,
+  card6 STRING,
+  card6_conflict BOOL,
+  first_seen_ts DATETIME,
+  last_seen_ts DATETIME,
+  transaction_count UINT,
+  external_ids STRING
+) WITH PRIMARY_ID_AS_ATTRIBUTE="true"
+
+CREATE VERTEX HHG_Transaction (
+  PRIMARY_ID TransactionID UINT,
+  ts DATETIME,
+  TransactionAmt DOUBLE,
+  ProductCD STRING,
+  channel STRING,
+  risk_score DOUBLE,
+  customer_id STRING,
+  card1 UINT,
+  card_key STRING,
+  addr1 STRING,
+  addr2 STRING,
+  dist1 STRING,
+  P_emaildomain STRING,
+  R_emaildomain STRING,
+  card4_raw STRING,
+  card6_raw STRING,
+  C1 DOUBLE,
+  C2 DOUBLE,
+  C3 DOUBLE,
+  C4 DOUBLE,
+  C5 DOUBLE,
+  C6 DOUBLE,
+  C7 DOUBLE,
+  C8 DOUBLE,
+  C9 DOUBLE,
+  C10 DOUBLE,
+  C11 DOUBLE,
+  C12 DOUBLE,
+  C13 DOUBLE,
+  C14 DOUBLE,
+  D1 STRING,
+  D2 STRING,
+  D3 STRING,
+  D4 STRING,
+  D10 STRING,
+  D11 STRING,
+  D15 STRING,
+  M1 STRING,
+  M2 STRING,
+  M3 STRING,
+  M4 STRING,
+  M6 STRING,
+  device_profile STRING,
+  DeviceType STRING,
+  id_12 STRING,
+  id_15 STRING,
+  id_23 STRING,
+  id_34 STRING
+) WITH PRIMARY_ID_AS_ATTRIBUTE="true"
+
+CREATE VERTEX HHG_DeviceProfile (
+  PRIMARY_ID device_profile STRING,
+  device_info_raw STRING,
+  os STRING,
+  browser STRING,
+  screen STRING,
+  n_transactions UINT,
+  n_distinct_customers UINT,
+  n_distinct_cards UINT,
+  hub_flag BOOL
+) WITH PRIMARY_ID_AS_ATTRIBUTE="true"
+
+CREATE VERTEX HHG_BillingRegion (
+  PRIMARY_ID addr1 STRING,
+  n_transactions UINT,
+  n_distinct_customers UINT,
+  n_distinct_cards UINT,
+  hub_flag BOOL
+) WITH PRIMARY_ID_AS_ATTRIBUTE="true"
+
+CREATE VERTEX HHG_ClosedCase (
+  PRIMARY_ID case_id STRING,
+  customer_id STRING,
+  card_key STRING,
+  outcome STRING,
+  pattern STRING,
+  opened_at DATETIME,
+  closed_at DATETIME,
+  exposure_usd DOUBLE,
+  n_txns UINT,
+  report_filed STRING,
+  actions_taken STRING,
+  analyst_notes STRING
+) WITH PRIMARY_ID_AS_ATTRIBUTE="true"
+
+// Seeded (Phase D) with the 20 case_pack rows in a neutral READY state --
+// only the trigger-level fields are populated at load time. READY (not
+// TRIGGERED) is deliberate: these vertices exist so the case_pack data has
+// a graph anchor, but nothing has "happened" to them yet -- a future
+// phase's agent must explicitly trigger/open the investigation, which is
+// itself a real, auditable state transition (READY -> INVESTIGATING or
+// similar), not an implicit side effect of this load job running.
+// Everything an agent would produce (verdict, evidence, next-best-actions,
+// sar, etc.) is left at its DEFAULT until that agent updates these vertices.
+// Complex nested structures (evidence list, next_best_actions, sar,
+// evidence_requests -- all lists-of-objects in the answer-file schema) are
+// stored as JSON-serialized STRING properties rather than decomposed into
+// additional vertex/edge types Phase C did not approve; see
+// docs/TIGERGRAPH_SCHEMA.md for why.
+CREATE VERTEX HHG_InvestigationCase (
+  PRIMARY_ID case_id STRING,
+  customer_id STRING,
+  card_key STRING,
+  trigger_type STRING,
+  trigger_text STRING,
+  flagged_txn_id UINT,
+  opened_at DATETIME,
+  risk_score DOUBLE DEFAULT -1,
+  status STRING DEFAULT "READY",
+  verdict STRING DEFAULT "",
+  fraud_probability DOUBLE DEFAULT -1,
+  pattern STRING DEFAULT "",
+  pattern_description STRING DEFAULT "",
+  exposure_usd DOUBLE DEFAULT 0,
+  summary STRING DEFAULT "",
+  stop_reason STRING DEFAULT "",
+  evidence_json STRING DEFAULT "",
+  next_best_actions_json STRING DEFAULT "",
+  sar_json STRING DEFAULT "",
+  evidence_requests_json STRING DEFAULT "",
+  written_to_graph BOOL DEFAULT "false",
+  created_at DATETIME,
+  updated_at DATETIME
+) WITH PRIMARY_ID_AS_ATTRIBUTE="true"

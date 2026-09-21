@@ -1,0 +1,154 @@
+// Phase D loading jobs. Run after 03_graph.gsql, with
+// `USE GRAPH HHGOA_FraudInvestigation` active.
+//
+// Every job reads directly from data/processed/*.csv (never the raw
+// organizer files in D:\hackathon\task_5\, which are never touched).
+// Files are loaded via pyTigerGraph's runLoadingJobWithFile(), whose own
+// documentation says the header row should be removed from the data file
+// first; header-stripped staging copies live in
+// data/processed/_load_staging/ (derived, temporary, never the validated
+// originals). Because the file fed at runtime has no header, every VALUES()
+// clause below uses POSITIONAL references ($0, $1, ...) matching each
+// source file's exact column order, not named ($"colname") references --
+// an earlier attempt at named references failed a compile-time semantic
+// check for exactly this reason, and positional references also sidestep
+// any need to keep a DEFINE HEADER block in sync with the CSV.
+//
+// CORRECTED (post-audit): GSQL positional references are 0-indexed --
+// $0 is the first column, confirmed directly from official docs ("$0,
+// $1,... refer to the first, second, ... columns"). Every VALUES() list in
+// this file originally used $1 as "first column" (1-indexed), an off-by-one
+// present in all 9 jobs uniformly. Every $N below has been shifted down by
+// exactly one ($1->$0, $2->$1, etc.); literals, type names, filenames, job
+// names, and USING options are unchanged. This is the leading suspect for
+// every REST-10005/"GetResult index out of range" failure seen so far: a
+// reference to a column index that doesn't exist in the row (the old code
+// always referenced index == column_count, one past the last valid index)
+// would make every row fail to parse.
+//
+// Two other things noted here, resolved during actual execution (see the
+// Phase D execution report, not assumed here):
+//  1. GSQL's LOAD ... VALUES() clause does not support CASE WHEN (a first
+//     attempt confirmed the parser rejects it -- different sub-grammar
+//     from GSQL queries). Boolean columns (card4_conflict, card6_conflict,
+//     hub_flag -- confirmed "True"/"False" literal strings, zero
+//     exceptions) and HHG_InvestigationCase.risk_score (empty for 9 of 20
+//     case_pack rows) are passed through unchanged; see the execution
+//     report for how GSQL actually handled each case.
+//  2. HEADER="false" below matches the header-stripped staging files.
+
+USE GRAPH HHGOA_FraudInvestigation
+
+CREATE LOADING JOB load_customers FOR GRAPH HHGOA_FraudInvestigation {
+  DEFINE FILENAME f_customers;
+  LOAD f_customers
+    TO VERTEX HHG_Customer VALUES ($0, $1, $2, $3, $4)
+    USING SEPARATOR=",", HEADER="false", EOL="\n", QUOTE="double";
+}
+
+CREATE LOADING JOB load_cards FOR GRAPH HHGOA_FraudInvestigation {
+  DEFINE FILENAME f_cards;
+  LOAD f_cards
+    TO VERTEX HHG_Card VALUES ($0, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10),
+    TO EDGE HHG_OWNS VALUES ($1, $0)
+    USING SEPARATOR=",", HEADER="false", EOL="\n", QUOTE="double";
+}
+
+CREATE LOADING JOB load_devices FOR GRAPH HHGOA_FraudInvestigation {
+  DEFINE FILENAME f_devices;
+  LOAD f_devices
+    TO VERTEX HHG_DeviceProfile VALUES ($0, $1, $2, $3, $4, $5, $6, $7, $8)
+    USING SEPARATOR=",", HEADER="false", EOL="\n", QUOTE="double";
+}
+
+CREATE LOADING JOB load_billing_regions FOR GRAPH HHGOA_FraudInvestigation {
+  DEFINE FILENAME f_billing_regions;
+  LOAD f_billing_regions
+    TO VERTEX HHG_BillingRegion VALUES ($0, $1, $2, $3, $4)
+    USING SEPARATOR=",", HEADER="false", EOL="\n", QUOTE="double";
+}
+
+// transactions_graph.csv column order (0-indexed):
+// 0 TransactionID, 1 TransactionAmt, 2 ProductCD, 3 card1, 4 card4_raw,
+// 5 card6_raw, 6 addr1, 7 addr2, 8 dist1, 9 P_emaildomain, 10 R_emaildomain,
+// 11-24 C1..C14, 25 D1, 26 D2, 27 D3, 28 D4, 29 D10, 30 D11, 31 D15,
+// 32 M1, 33 M2, 34 M3, 35 M4, 36 M6, 37 customer_id, 38 ts, 39 channel,
+// 40 risk_score, 41 card_key, 42 device_profile, 43 DeviceType,
+// 44 id_12, 45 id_15, 46 id_23, 47 id_34
+CREATE LOADING JOB load_transactions FOR GRAPH HHGOA_FraudInvestigation {
+  DEFINE FILENAME f_transactions;
+  LOAD f_transactions
+    TO VERTEX HHG_Transaction VALUES (
+      $0, $38, $1, $2, $39, $40,
+      $37, $3, $41, $6, $7, $8,
+      $9, $10, $4, $5,
+      $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
+      $25, $26, $27, $28, $29, $30, $31,
+      $32, $33, $34, $35, $36,
+      $42, $43, $44, $45, $46, $47
+    ),
+    TO EDGE HHG_MADE VALUES ($41, $0),
+    TO EDGE HHG_FROM_DEVICE VALUES ($0, $42) WHERE $42 != "",
+    TO EDGE HHG_BILLED_IN VALUES ($0, $6) WHERE $6 != ""
+    USING SEPARATOR=",", HEADER="false", EOL="\n", QUOTE="double";
+}
+
+CREATE LOADING JOB load_historical_cases FOR GRAPH HHGOA_FraudInvestigation {
+  DEFINE FILENAME f_historical_cases;
+  LOAD f_historical_cases
+    TO VERTEX HHG_ClosedCase VALUES ($0, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11),
+    TO EDGE HHG_ON_CARD VALUES ($0 HHG_ClosedCase, $2 HHG_Card)
+    USING SEPARATOR=",", HEADER="false", EOL="\n", QUOTE="double";
+}
+
+CREATE LOADING JOB load_closed_case_involves_transaction FOR GRAPH HHGOA_FraudInvestigation {
+  DEFINE FILENAME f_involves;
+  LOAD f_involves
+    TO EDGE HHG_INVOLVES VALUES ($0 HHG_ClosedCase, $1 HHG_Transaction)
+    USING SEPARATOR=",", HEADER="false", EOL="\n", QUOTE="double";
+}
+
+CREATE LOADING JOB load_closed_case_connected_to_card FOR GRAPH HHGOA_FraudInvestigation {
+  DEFINE FILENAME f_connected;
+  LOAD f_connected
+    TO EDGE HHG_CONNECTED_TO VALUES ($0 HHG_ClosedCase, $1 HHG_Card, $2)
+    USING SEPARATOR=",", HEADER="false", EOL="\n", QUOTE="double";
+}
+
+// Seeds the 20 benchmark cases as InvestigationCase vertices in a neutral
+// READY state (not TRIGGERED) -- deterministic ETL from a fully-known
+// static file, NOT agent behavior. The vertex existing is not the same as
+// an investigation having started; a future phase's agent must explicitly
+// transition status away from READY. No evidence/verdict/actions exist
+// yet; those fields keep their DEFAULT values from 01_vertices.gsql until
+// that agent updates these same vertices (GSQL upserts by primary id).
+// case_pack_resolved.csv column order (0-indexed): 0 case_id, 1 opened_at,
+// 2 trigger_type, 3 trigger_text, 4 flagged_txn_id, 5 customer_id,
+// 6 card_key, 7 risk_score
+// GSQL requires every vertex attribute to appear in VALUES() -- there is no
+// partial-prefix loading (confirmed: a first attempt with only the first 8
+// columns failed a compile-time check expecting all 23). The 15 attributes
+// with no source column get their documented default as a literal constant
+// here (matching 01_vertices.gsql's own DEFAULT clauses exactly), and
+// created_at/updated_at reuse opened_at ($1) since "when was this seed
+// record created" is reasonably the moment its alert opened; a future
+// agent overwrites updated_at with a real timestamp as its first action.
+CREATE LOADING JOB load_case_pack_seed FOR GRAPH HHGOA_FraudInvestigation {
+  DEFINE FILENAME f_case_pack;
+  LOAD f_case_pack
+    TO VERTEX HHG_InvestigationCase VALUES (
+      $0, $5, $6, $2, $3, $4, $1, $7,
+      "READY", "", -1, "", "", 0, "", "", "", "", "", "", "false",
+      $1, $1
+    ),
+    TO EDGE HHG_ON_CARD VALUES ($0 HHG_InvestigationCase, $6 HHG_Card)
+    USING SEPARATOR=",", HEADER="false", EOL="\n", QUOTE="double";
+}
+
+// Run order at execution time:
+//   load_customers, load_cards, load_devices, load_billing_regions
+//   -> load_transactions (needs Card vertices to exist for HHG_MADE)
+//   -> load_historical_cases -> load_closed_case_involves_transaction
+//      -> load_closed_case_connected_to_card
+//   -> load_case_pack_seed
+// HHG_NEXT and HHG_CITES have no loading job in Phase D (see 02_edges.gsql).
