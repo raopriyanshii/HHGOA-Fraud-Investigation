@@ -48,16 +48,45 @@ _DEFERRED_REASONS = {
     "ALLOW_TRANSACTION": "no policy rule cites a positive trigger condition for this action",
     "DECLINE_TRANSACTION": "R1/R4/R5 require fraud_probability or a customer-reply state, not computed by G1/G2",
     "MONITOR_CARD": "R4 requires a no-reply state, not tracked by G1/G2",
-    "MONITOR_CONNECTED_CARDS": "R6 requires confirmed fraud on other cards sharing a named element (device profile, billing region, or recipient email); G1 never checks other cards' fraud status",
     "WARN_CUSTOMER": "R7 requires a customer response and a recurring-pattern match, not available",
     "VERIFY_WITH_CUSTOMER": "R1 requires fraud_probability, not computed by G1/G2",
     "STEP_UP_AUTH": "R1/R5 require fraud_probability or a card-testing pattern, not available",
     "BLOCK_CARD": "R1/R2/R5 require fraud_probability or a customer response, not available",
     "GENERATE_REPORT": "no policy rule cites a positive trigger condition for this action",
-    "FILE_REPORT": "R2/R6/R9 require a customer response, cross-card fraud verification for a named shared element, or pattern judgment, none available",
     "ESCALATE_TO_ANALYST": "R8/R9 require fraud_probability and exposure_usd, or pattern judgment, none available",
     "CLOSE_NO_FRAUD": "R3 requires a customer confirmation response, not available",
 }
+# MONITOR_CONNECTED_CARDS and FILE_REPORT moved out of this table -- they
+# now have dedicated evaluators (_evaluate_monitor_connected_cards,
+# _evaluate_file_report) below, the same pattern CREATE_CASE and
+# BLOCK_ALL_CARDS already use, since R6 makes them conditionally
+# RECOMMENDED rather than unconditionally DEFERRED.
+
+
+def _r6_evidence_present(ledger: dict) -> bool:
+    """R6 (organizer Fraud Policy): "several cards show fraud from the
+    same device profile, billing region, or recipient email." Sufficient
+    ONLY when a successful cross_card_fraud_verification (Q9) result
+    contains at least one other_cards entry, under via_device or
+    via_region, with has_confirmed_fraud == True. Mere connectivity
+    (a shared element with no confirmed fraud on the other card) is not
+    enough -- G1's Q9 gate already filters to non-hub elements before any
+    result reaches the ledger, so a non-null via_device/via_region here
+    already means the underlying element was non-hub; this function does
+    not need to, and does not, re-check hub_flag. Never reads
+    HHG_CONNECTED_TO-derived evidence (connected_via_case) -- Q9 never
+    gathers that, so it cannot leak in here. Never reads risk_score.
+    """
+    for tc in ledger.get("tool_calls", []):
+        if tc.get("tool") == "cross_card_fraud_verification" and tc.get("success"):
+            result = tc.get("curated_result_summary") or {}
+            for path in ("via_device", "via_region"):
+                path_result = result.get(path)
+                if path_result:
+                    for entry in path_result.get("other_cards", []):
+                        if entry.get("has_confirmed_fraud"):
+                            return True
+    return False
 
 
 def _get_trigger_type(ledger: dict) -> tuple[str | None, str]:
@@ -77,9 +106,18 @@ def _get_trigger_type(ledger: dict) -> tuple[str | None, str]:
 
 def _evaluate_create_case(ledger: dict) -> tuple[str, str | None, str]:
     trigger_type, status = _get_trigger_type(ledger)
+
+    # Existing §3a customer-dispute path -- condition and reason text
+    # unchanged from the approved Revision 2 spec.
+    if status == "known" and trigger_type == "customer_report":
+        return RECOMMENDED, "auto", "§3a: customer disputes a charge (trigger_type == 'customer_report')"
+
+    # Additional, independent R6 path (G4): does not replace or alter the
+    # customer_report check above, which is always evaluated first.
+    if _r6_evidence_present(ledger):
+        return RECOMMENDED, "auto", "R6: shared non-hub device/region evidence shows independently confirmed fraud on another card"
+
     if status == "known":
-        if trigger_type == "customer_report":
-            return RECOMMENDED, "auto", "§3a: customer disputes a charge (trigger_type == 'customer_report')"
         return (
             DEFERRED,
             None,
@@ -96,6 +134,26 @@ def _evaluate_create_case(ledger: dict) -> tuple[str, str | None, str]:
         DEFERRED,
         None,
         "§3a: trigger_type unavailable -- investigation used a flagged_txn_id trigger, no case resolution was performed",
+    )
+
+
+def _evaluate_monitor_connected_cards(ledger: dict) -> tuple[str, str | None, str]:
+    if _r6_evidence_present(ledger):
+        return RECOMMENDED, "auto", "R6: shared non-hub device/region evidence shows independently confirmed fraud on another card"
+    return (
+        DEFERRED,
+        None,
+        "R6 requires confirmed fraud on another card sharing a named element (device profile, billing region, or recipient email); no such evidence present",
+    )
+
+
+def _evaluate_file_report(ledger: dict) -> tuple[str, str | None, str]:
+    if _r6_evidence_present(ledger):
+        return RECOMMENDED, "L2", "R6: shared non-hub device/region evidence shows independently confirmed fraud on another card"
+    return (
+        DEFERRED,
+        None,
+        "R2/R6/R9 require a customer response, cross-card fraud verification for a named shared element, or pattern judgment; only the R6 check is currently available and its evidence is absent here",
     )
 
 
@@ -135,6 +193,10 @@ def evaluate(ledger: dict) -> dict:
             state, route, reason = _evaluate_create_case(ledger)
         elif action == "BLOCK_ALL_CARDS":
             state, route, reason = _evaluate_block_all_cards(ledger)
+        elif action == "MONITOR_CONNECTED_CARDS":
+            state, route, reason = _evaluate_monitor_connected_cards(ledger)
+        elif action == "FILE_REPORT":
+            state, route, reason = _evaluate_file_report(ledger)
         else:
             state, route, reason = DEFERRED, None, _DEFERRED_REASONS[action]
 

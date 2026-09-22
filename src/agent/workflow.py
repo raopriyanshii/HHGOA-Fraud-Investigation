@@ -35,7 +35,7 @@ MAX_FOLLOW_UP_CARDS = 3
 # "call anything" surface -- a hardcoded allowlist, checked defensively
 # in _default_call_tool below.
 _ALLOWED_TOOLS = frozenset(
-    {"benchmark_case_resolution", "combined_evidence", "historical_case_evidence"}
+    {"benchmark_case_resolution", "combined_evidence", "historical_case_evidence", "cross_card_fraud_verification"}
 )
 
 CallTool = Callable[[str, dict], Awaitable[tuple[bool, Any, str | None]]]
@@ -207,11 +207,44 @@ async def investigate(trigger: dict, *, window_hours: float = 24.0, call_tool: C
         uncertainties.append("flagged_txn_id did not resolve to a known transaction")
         return _finalize(investigation_id, trigger, tool_calls, uncertainties, "insufficient_evidence", {"reasons": ["transaction_not_found"], "tool_call_orders": [combined_order]})
 
+    # --- Q9 gate: cross_card_fraud_verification (G4 Option B) ---
+    # Uses only evidence combined_evidence already returned -- no new query
+    # is needed to compute this gate. Costs exactly one call slot when it
+    # fires, and reduces Round 2's effective cap by exactly one in that
+    # same case, so the total never exceeds the frozen 5-call ceiling
+    # (spec Section 4) regardless of trigger type, gate outcome, or ring
+    # size:
+    #   case_id  + gate True  + ring: 1 + 1 + 1 + 2 = 5
+    #   case_id  + gate False + ring: 1 + 1 + 0 + 3 = 5
+    #   flagged_txn_id + gate True  + ring: 1 + 1 + 2 = 4
+    #   flagged_txn_id + gate False + ring: 1 + 0 + 3 = 4
+    # MAX_FOLLOW_UP_CARDS itself is unchanged; only this investigation's
+    # *effective* cap varies.
+    device_evidence = evidence.get("device_evidence")
+    billing_region = evidence.get("billing_region")
+    q9_gate = evidence.get("card") is not None and (
+        (device_evidence is not None and device_evidence.get("hub_flag") is False)
+        or (billing_region is not None and billing_region.get("hub_flag") is False)
+    )
+
+    effective_follow_up_cap = MAX_FOLLOW_UP_CARDS
+    if q9_gate:
+        card_key_for_q9 = evidence["card"]["card_key"]
+        q9_order = order
+        ok, cross_card, err = await call_tool("cross_card_fraud_verification", {"card_key": card_key_for_q9})
+        tool_calls.append(_ledger_entry(q9_order, "cross_card_fraud_verification", {"card_key": card_key_for_q9}, ok, cross_card, err))
+        order += 1
+        if not ok:
+            uncertainties.append(f"cross_card_fraud_verification failed: {err}")
+        # Round 2's cap shrinks regardless of whether this call succeeded --
+        # the slot was already spent either way.
+        effective_follow_up_cap = MAX_FOLLOW_UP_CARDS - 1
+
     # --- Follow-up decision + Round 2 (spec Section 5's deterministic selection) ---
     connected_via_case = ((evidence.get("connected_cards") or {}).get("connected_via_case") or [])
     round2: list[tuple[str, int, dict | None]] = []
     if connected_via_case:
-        selected = sorted(connected_via_case, key=lambda c: c["connected_card_key"])[:MAX_FOLLOW_UP_CARDS]
+        selected = sorted(connected_via_case, key=lambda c: c["connected_card_key"])[:effective_follow_up_cap]
         for c in selected:
             card_key = c["connected_card_key"]
             ok, r2, err = await call_tool("historical_case_evidence", {"card_key": card_key})
@@ -224,10 +257,12 @@ async def investigate(trigger: dict, *, window_hours: float = 24.0, call_tool: C
             order += 1
 
     # Hard-limit self-check (spec Section 4): defense-in-depth, not the
-    # only enforcement -- the [:MAX_FOLLOW_UP_CARDS] slice above already
-    # makes exceeding this structurally impossible.
+    # only enforcement -- the [:effective_follow_up_cap] slice above already
+    # makes exceeding this structurally impossible. Checked against the
+    # effective cap (2 or 3, per the Q9 gate above), which is always
+    # <= MAX_FOLLOW_UP_CARDS -- MAX_FOLLOW_UP_CARDS itself is unchanged.
     followups_made = sum(1 for tc in tool_calls if tc["tool"] == "historical_case_evidence")
-    assert followups_made <= MAX_FOLLOW_UP_CARDS, "Round 2 exceeded the hard follow-up-card limit"
+    assert followups_made <= effective_follow_up_cap, "Round 2 exceeded the effective follow-up-card limit"
 
     # --- Reassess (no further tool calls triggered by this, ever -- no Round 3) ---
     recommendation, basis = _assess(evidence, round2)

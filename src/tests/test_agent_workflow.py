@@ -145,7 +145,10 @@ def test_direct_confirmed_fraud_escalates():
 
 def test_narrow_device_evidence_without_fraud_monitors():
     evidence = _base_evidence(device_evidence={"hub_flag": False, "n_distinct_customers": 3, "cards": []})
-    call_tool = make_call_tool({"combined_evidence": evidence})
+    # Non-hub device_evidence trips the G4 Q9 gate -- register a neutral
+    # (no cross-card evidence) response so this test still isolates G1's
+    # own monitor-tier logic, not G4's R6 evidence.
+    call_tool = make_call_tool({"combined_evidence": evidence, "cross_card_fraud_verification": {"via_device": None, "via_region": None}})
     result = run(wf.investigate({"type": "flagged_txn_id", "value": 1}, call_tool=call_tool))
     assert result["recommendation"] == "monitor"
     assert result["recommendation_basis"]["reasons"] == ["narrow_device_evidence"]
@@ -162,7 +165,9 @@ def test_confirmed_fraud_takes_precedence_over_device_monitor_signal():
         historical_cases={"direct_cases": [{"case_id": "CC-1", "outcome": "confirmed_fraud"}], "connected_cases": []},
         device_evidence={"hub_flag": False, "n_distinct_customers": 3, "cards": []},
     )
-    call_tool = make_call_tool({"combined_evidence": evidence})
+    # Non-hub device_evidence trips the G4 Q9 gate here too -- neutral response,
+    # same reasoning as test_narrow_device_evidence_without_fraud_monitors above.
+    call_tool = make_call_tool({"combined_evidence": evidence, "cross_card_fraud_verification": {"via_device": None, "via_region": None}})
     result = run(wf.investigate({"type": "flagged_txn_id", "value": 1}, call_tool=call_tool))
     assert result["recommendation"] == "escalate"
     assert "direct_confirmed_fraud" in result["recommendation_basis"]["reasons"]
@@ -278,6 +283,95 @@ def test_hard_limit_cannot_be_exceeded_even_with_many_connected_cards():
     assert len(result["tool_calls"]) == 1 + wf.MAX_FOLLOW_UP_CARDS
 
 
+# --- G4: Q9 gate (Option B) + effective Round-2 cap, ceiling validation ---
+
+def _three_connected_cards():
+    return [{"connected_card_key": f"C{i:05d}:1", "connected_customer_id": f"C{i:05d}"} for i in range(3)]
+
+
+def test_ceiling_case_id_trigger_q9_gate_true_three_connected_cards_stays_at_five():
+    connected = _three_connected_cards()
+    evidence = _base_evidence(
+        device_evidence={"hub_flag": False, "n_distinct_customers": 3, "cards": []},
+        connected_cards={"connected_via_case": connected, "connected_via_device": []},
+    )
+    call_tool = make_call_tool({
+        "benchmark_case_resolution": {"flagged_txn_id": 1, "case_id": "HHG-001"},
+        "combined_evidence": evidence,
+        "cross_card_fraud_verification": {"via_device": None, "via_region": None},
+        "historical_case_evidence": {c["connected_card_key"]: {"direct_cases": [], "connected_cases": []} for c in connected},
+    })
+    result = run(wf.investigate({"type": "case_id", "value": "HHG-001"}, call_tool=call_tool))
+    assert len(result["tool_calls"]) == 5
+    followups = [tc for tc in result["tool_calls"] if tc["tool"] == "historical_case_evidence"]
+    assert len(followups) == 2, "effective cap must reduce from 3 to 2 when Q9 fires"
+    assert any(tc["tool"] == "cross_card_fraud_verification" for tc in result["tool_calls"])
+
+
+def test_ceiling_flagged_txn_id_trigger_q9_gate_true_three_connected_cards():
+    connected = _three_connected_cards()
+    evidence = _base_evidence(
+        device_evidence={"hub_flag": False, "n_distinct_customers": 3, "cards": []},
+        connected_cards={"connected_via_case": connected, "connected_via_device": []},
+    )
+    call_tool = make_call_tool({
+        "combined_evidence": evidence,
+        "cross_card_fraud_verification": {"via_device": None, "via_region": None},
+        "historical_case_evidence": {c["connected_card_key"]: {"direct_cases": [], "connected_cases": []} for c in connected},
+    })
+    result = run(wf.investigate({"type": "flagged_txn_id", "value": 1}, call_tool=call_tool))
+    assert len(result["tool_calls"]) == 4  # no resolution call for this trigger type -- below the 5 ceiling
+    followups = [tc for tc in result["tool_calls"] if tc["tool"] == "historical_case_evidence"]
+    assert len(followups) == 2
+
+
+def test_ceiling_q9_gate_false_three_connected_cards_keeps_full_round_2():
+    connected = _three_connected_cards()
+    evidence = _base_evidence(connected_cards={"connected_via_case": connected, "connected_via_device": []})
+    # device_evidence stays None and billing_region stays hub-flagged (the
+    # _base_evidence defaults) -- the gate must not fire.
+    call_tool = make_call_tool({
+        "combined_evidence": evidence,
+        "historical_case_evidence": {c["connected_card_key"]: {"direct_cases": [], "connected_cases": []} for c in connected},
+    })
+    result = run(wf.investigate({"type": "flagged_txn_id", "value": 1}, call_tool=call_tool))
+    assert not any(tc["tool"] == "cross_card_fraud_verification" for tc in result["tool_calls"])
+    followups = [tc for tc in result["tool_calls"] if tc["tool"] == "historical_case_evidence"]
+    assert len(followups) == 3, "full cap must be unreduced when Q9 never fires"
+
+
+def test_q9_failure_is_recorded_and_investigation_continues_with_reduced_cap():
+    connected = _three_connected_cards()
+    evidence = _base_evidence(
+        device_evidence={"hub_flag": False, "n_distinct_customers": 3, "cards": []},
+        connected_cards={"connected_via_case": connected, "connected_via_device": []},
+    )
+    call_tool = make_call_tool({
+        "combined_evidence": evidence,
+        "cross_card_fraud_verification": ("error", "connection reset by peer"),
+        "historical_case_evidence": {c["connected_card_key"]: {"direct_cases": [], "connected_cases": []} for c in connected},
+    })
+    result = run(wf.investigate({"type": "flagged_txn_id", "value": 1}, call_tool=call_tool))
+    q9_call = next(tc for tc in result["tool_calls"] if tc["tool"] == "cross_card_fraud_verification")
+    assert q9_call["success"] is False
+    assert any("cross_card_fraud_verification failed" in u for u in result["uncertainties"])
+    followups = [tc for tc in result["tool_calls"] if tc["tool"] == "historical_case_evidence"]
+    assert len(followups) == 2, "cap stays reduced even though the Q9 call itself failed"
+    assert result["recommendation"] in ("escalate", "monitor", "insufficient_evidence")  # did not crash
+
+
+def test_q9_gate_true_but_no_connected_cards_still_calls_q9_and_skips_round_2():
+    evidence = _base_evidence(device_evidence={"hub_flag": False, "n_distinct_customers": 3, "cards": []})
+    call_tool = make_call_tool({
+        "combined_evidence": evidence,
+        "cross_card_fraud_verification": {"via_device": None, "via_region": None},
+    })
+    result = run(wf.investigate({"type": "flagged_txn_id", "value": 1}, call_tool=call_tool))
+    assert any(tc["tool"] == "cross_card_fraud_verification" for tc in result["tool_calls"])
+    assert not any(tc["tool"] == "historical_case_evidence" for tc in result["tool_calls"])
+    assert len(result["tool_calls"]) == 2
+
+
 # --- extra: large lists are trimmed in the ledger, not in the recommendation logic ---
 
 def test_large_list_is_trimmed_in_ledger_but_still_used_for_recommendation():
@@ -285,7 +379,9 @@ def test_large_list_is_trimmed_in_ledger_but_still_used_for_recommendation():
     evidence = _base_evidence(
         device_evidence={"hub_flag": False, "n_distinct_customers": 200, "cards": many_devices},
     )
-    call_tool = make_call_tool({"combined_evidence": evidence})
+    # Non-hub device_evidence trips the G4 Q9 gate -- neutral response, same
+    # reasoning as the other two fixed-up tests above.
+    call_tool = make_call_tool({"combined_evidence": evidence, "cross_card_fraud_verification": {"via_device": None, "via_region": None}})
     result = run(wf.investigate({"type": "flagged_txn_id", "value": 1}, call_tool=call_tool))
     # recommendation logic still sees the real (untrimmed) evidence:
     assert result["recommendation"] == "monitor"

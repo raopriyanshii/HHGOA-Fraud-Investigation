@@ -111,6 +111,56 @@ Minimum possible: **1** call. Maximum possible: **5** calls (`case_id`
 trigger, 3 connected cards selected). This range is derived directly from
 the workflow in Section 3, not assumed.
 
+### 4a. G4 addition — the Q9 gate, and its accepted blind spot (finalized)
+
+G4 added one more possible call, `cross_card_fraud_verification` (Q9,
+Phase G3), inside Round 1, gated on evidence `combined_evidence` already
+returned — no new query is needed to evaluate the gate itself:
+
+```
+q9_gate = card resolved AND (
+    (device_evidence exists AND device_evidence.hub_flag == False)
+    OR (billing_region exists AND billing_region.hub_flag == False)
+)
+```
+
+The `card resolved` prerequisite is structural, not part of the hub-flag
+condition itself: `cross_card_fraud_verification` takes `card_key` as its
+only input, so the gate cannot fire without a resolved card to call it
+with, regardless of what `device_evidence`/`billing_region` show.
+
+When `q9_gate` is true, Q9 is called exactly once, and Round 2's
+effective follow-up cap drops from 3 to 2 **for that investigation only**
+— `MAX_FOLLOW_UP_CARDS` itself stays 3. This keeps the maximum possible
+call count at **5 in every trigger/gate/ring combination**, not 6:
+
+| Trigger | Q9 gate | Calls | Sequence |
+|---|---|---|---|
+| `case_id` | true | **5** (at most) | resolution, `combined_evidence`, Q9, up to 2× `historical_case_evidence` |
+| `case_id` | false | **5** (at most) | resolution, `combined_evidence`, up to 3× `historical_case_evidence` |
+| `flagged_txn_id` | true | **4** (at most) | `combined_evidence`, Q9, up to 2× `historical_case_evidence` |
+| `flagged_txn_id` | false | **4** (at most) | `combined_evidence`, up to 3× `historical_case_evidence` |
+
+**Accepted limitation, not a defect:** the gate reads `device_evidence`/
+`billing_region` as `combined_evidence` returns them — both scoped to the
+*flagged transaction specifically* (Q3/Q6 called on that one transaction's
+own device/region). Q9 itself, once invoked, checks the *card's full
+transaction history* (all non-hub devices/regions the card has ever used,
+via its own batched traversal). This creates a real, specific blind spot:
+if the flagged transaction's own device/region happens to be hub-flagged
+or absent, but a *different* transaction on the same card used a non-hub
+device/region that Q9 would otherwise have found cross-card fraud
+evidence through, the gate stays closed and Q9 is never called for that
+investigation — even though Q9 itself would have found something. This
+was identified and accepted explicitly when Option B was chosen over the
+alternatives (Options A/C/D, see the G4 design review): given the frozen
+5-call ceiling, some gate imprecision is unavoidable in any design that
+doesn't touch the ceiling itself, and this specific trade-off was chosen
+because it costs nothing extra to evaluate and preserves Round 2's full
+strength whenever Q9 isn't relevant, rather than weakening Round 2
+unconditionally (Option A) or introducing an unprincipled exclusion
+(Option C).
+
 ## 5. Follow-up card selection — deterministic rule (finalized)
 
 The agent must not choose which connected cards to look up based on any

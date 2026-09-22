@@ -348,3 +348,126 @@ def test_investigation_recommendation_is_passed_through_unchanged():
     for tier in ("escalate", "monitor", "insufficient_evidence"):
         result = g2.evaluate(_base_ledger(recommendation=tier))
         assert result["investigation_recommendation"] == tier
+
+
+# --- G4: R6 (cross_card_fraud_verification) tests ---
+
+def _q9_call(order, via_device=None, via_region=None, success=True):
+    if not success:
+        return {
+            "order": order,
+            "tool": "cross_card_fraud_verification",
+            "arguments": {"card_key": "C12382:21139"},
+            "success": False,
+            "error": "connection reset by peer",
+        }
+    return {
+        "order": order,
+        "tool": "cross_card_fraud_verification",
+        "arguments": {"card_key": "C12382:21139"},
+        "success": True,
+        "curated_result_summary": {"via_device": via_device, "via_region": via_region},
+    }
+
+
+_QUALIFYING_VIA_DEVICE = {"other_cards": [{"card_key": "C99999:1", "customer_id": "C99999", "same_customer": False, "has_confirmed_fraud": True, "confirmed_fraud_case_ids": ["CC-9"]}]}
+_NON_QUALIFYING_VIA_DEVICE = {"other_cards": [{"card_key": "C99999:1", "customer_id": "C99999", "same_customer": False, "has_confirmed_fraud": False, "confirmed_fraud_case_ids": []}]}
+
+
+# 6. customer_report CREATE_CASE still works, unaffected by R6 existing
+def test_customer_report_create_case_path_still_works_with_r6_present():
+    ledger = _base_ledger(tool_calls=[
+        _resolution_call(1, "customer_report"),
+        _base_ledger()["tool_calls"][0],
+        _q9_call(3, via_device=_QUALIFYING_VIA_DEVICE),
+    ])
+    result = g2.evaluate(ledger)
+    entry = next(e for e in result["recommended"] if e["action"] == "CREATE_CASE")
+    assert entry["route"] == "auto"
+    assert "customer disputes" in entry["reason"]  # the ORIGINAL §3a reason, not R6's
+
+
+# 7. R6 CREATE_CASE works when Q9 evidence qualifies (non-customer_report trigger)
+def test_r6_create_case_recommended_when_q9_evidence_qualifies():
+    ledger = _base_ledger(tool_calls=[
+        _resolution_call(1, "risk_score"),  # confirmed NOT a customer dispute
+        _q9_call(2, via_device=_QUALIFYING_VIA_DEVICE),
+    ])
+    result = g2.evaluate(ledger)
+    entry = next(e for e in result["recommended"] if e["action"] == "CREATE_CASE")
+    assert entry["route"] == "auto"
+    assert entry["reason"].startswith("R6")
+    assert not any(e["action"] == "CREATE_CASE" for e in result["deferred"])
+
+
+# 8. R6 MONITOR_CONNECTED_CARDS works
+def test_r6_monitor_connected_cards_recommended_when_q9_evidence_qualifies():
+    ledger = _base_ledger(tool_calls=[_q9_call(2, via_region=_QUALIFYING_VIA_DEVICE)])
+    result = g2.evaluate(ledger)
+    entry = next(e for e in result["recommended"] if e["action"] == "MONITOR_CONNECTED_CARDS")
+    assert entry["route"] == "auto"
+    assert entry["reason"].startswith("R6")
+
+
+# 9. R6 FILE_REPORT works (route L2)
+def test_r6_file_report_recommended_when_q9_evidence_qualifies():
+    ledger = _base_ledger(tool_calls=[_q9_call(2, via_device=_QUALIFYING_VIA_DEVICE)])
+    result = g2.evaluate(ledger)
+    entry = next(e for e in result["recommended"] if e["action"] == "FILE_REPORT")
+    assert entry["route"] == "L2"
+    assert entry["reason"].startswith("R6")
+
+
+# 10. Q9 evidence without confirmed fraud remains insufficient
+def test_q9_shared_element_without_confirmed_fraud_is_not_sufficient_for_r6():
+    ledger = _base_ledger(tool_calls=[_q9_call(2, via_device=_NON_QUALIFYING_VIA_DEVICE)])
+    result = g2.evaluate(ledger)
+    for action in ("CREATE_CASE", "MONITOR_CONNECTED_CARDS", "FILE_REPORT"):
+        assert any(e["action"] == action for e in result["deferred"]), f"{action} should be deferred without confirmed fraud"
+        assert not any(e["action"] == action for e in result["recommended"])
+
+
+def test_q9_call_present_but_failed_does_not_satisfy_r6():
+    ledger = _base_ledger(tool_calls=[_q9_call(2, success=False)])
+    result = g2.evaluate(ledger)
+    for action in ("CREATE_CASE", "MONITOR_CONNECTED_CARDS", "FILE_REPORT"):
+        assert any(e["action"] == action for e in result["deferred"])
+
+
+def test_q9_absent_from_ledger_entirely_does_not_satisfy_r6():
+    # The common case today: G1 never called Q9 (gate was false).
+    result = g2.evaluate(_base_ledger())
+    for action in ("CREATE_CASE", "MONITOR_CONNECTED_CARDS", "FILE_REPORT"):
+        assert any(e["action"] == action for e in result["deferred"])
+
+
+# 11. existing BLOCK_ALL_CARDS behavior remains unchanged, even with qualifying R6 evidence
+def test_block_all_cards_still_prohibited_even_with_qualifying_r6_evidence():
+    ledger = _base_ledger(tool_calls=[_q9_call(2, via_device=_QUALIFYING_VIA_DEVICE, via_region=_QUALIFYING_VIA_DEVICE)])
+    result = g2.evaluate(ledger)
+    assert any(e["action"] == "BLOCK_ALL_CARDS" for e in result["prohibited"])
+    assert not any(e["action"] == "BLOCK_ALL_CARDS" for e in result["recommended"])
+
+
+def test_r6_evidence_present_ignores_connected_via_case_shaped_data():
+    # Sanity check that HHG_CONNECTED_TO-derived evidence (which Q9 never
+    # produces) cannot accidentally satisfy _r6_evidence_present even if a
+    # tool_calls entry happens to carry a similarly-shaped connected_cards
+    # field under a different tool name.
+    ledger = _base_ledger(tool_calls=[{
+        "order": 2,
+        "tool": "connected_cards",  # not cross_card_fraud_verification
+        "arguments": {"card_key": "C12382:21139"},
+        "success": True,
+        "curated_result_summary": {"connected_via_case": [{"connected_card_key": "C99999:1", "connected_customer_id": "C99999"}], "connected_via_device": []},
+    }])
+    assert g2._r6_evidence_present(ledger) is False
+
+
+def test_canonical_order_preserved_with_r6_actions_recommended():
+    ledger = _base_ledger(tool_calls=[_q9_call(2, via_device=_QUALIFYING_VIA_DEVICE)])
+    result = g2.evaluate(ledger)
+    all_actions = [e["action"] for bucket in ("recommended", "prohibited", "eligible_not_recommended", "deferred") for e in result[bucket]]
+    reconstructed = tuple(sorted(all_actions, key=g2.CANONICAL_ACTION_ORDER.index))
+    assert reconstructed == g2.CANONICAL_ACTION_ORDER
+    assert len(all_actions) == 14
