@@ -390,3 +390,65 @@ def test_large_list_is_trimmed_in_ledger_but_still_used_for_recommendation():
     stored_cards = stored_device_evidence["cards"]
     assert isinstance(stored_cards, dict) and stored_cards["count"] == 200
     assert len(stored_cards["sample"]) == wf._MAX_LIST_SAMPLE
+
+
+# --- G5-B: R5 pattern_evidence wiring (local, zero tool calls) ---
+
+_R5_MATCHING_TEMPORAL_ACTIVITY = [
+    {"TransactionID": 1, "ts": "2016-01-01 10:00:00", "TransactionAmt": 5.0, "channel": "online"},
+    {"TransactionID": 2, "ts": "2016-01-01 10:05:00", "TransactionAmt": 6.0, "channel": "online"},
+    {"TransactionID": 3, "ts": "2016-01-01 10:10:00", "TransactionAmt": 7.0, "channel": "online"},
+    {"TransactionID": 4, "ts": "2016-01-01 10:30:00", "TransactionAmt": 50.0, "channel": "online"},
+]
+
+
+def test_r5_matched_evidence_appears_in_returned_ledger():
+    evidence = _base_evidence(temporal_activity=_R5_MATCHING_TEMPORAL_ACTIVITY)
+    call_tool = make_call_tool({"combined_evidence": evidence})
+    result = run(wf.investigate({"type": "flagged_txn_id", "value": 1}, call_tool=call_tool))
+    assert result["pattern_evidence"]["matched"] is True
+    assert result["pattern_evidence"]["pattern"] == "card_testing"
+    assert len(result["pattern_evidence"]["candidates"]) >= 1
+
+
+def test_r5_processing_adds_no_tool_call():
+    evidence_with_r5 = _base_evidence(temporal_activity=_R5_MATCHING_TEMPORAL_ACTIVITY)
+    evidence_without_r5 = _base_evidence()  # default, non-matching temporal_activity
+    for evidence in (evidence_with_r5, evidence_without_r5):
+        call_tool = make_call_tool({"combined_evidence": evidence})
+        result = run(wf.investigate({"type": "flagged_txn_id", "value": 1}, call_tool=call_tool))
+        assert len(result["tool_calls"]) == 1  # just combined_evidence, regardless of R5 outcome
+        assert result["tool_calls"][0]["tool"] == "combined_evidence"
+        assert not any(tc["tool"] not in ("combined_evidence",) for tc in result["tool_calls"])
+
+
+def test_r5_call_count_remains_within_existing_ceiling():
+    # Combine an R5-matching temporal_activity with a case_id trigger AND a
+    # full 3-card ring, to confirm R5's local processing doesn't add to the
+    # tool-call total even in the worst-case scenario already covered by
+    # the G4 ceiling tests.
+    connected = _three_connected_cards()
+    evidence = _base_evidence(
+        temporal_activity=_R5_MATCHING_TEMPORAL_ACTIVITY,
+        connected_cards={"connected_via_case": connected, "connected_via_device": []},
+    )
+    call_tool = make_call_tool({
+        "benchmark_case_resolution": {"flagged_txn_id": 1, "case_id": "HHG-001"},
+        "combined_evidence": evidence,
+        "historical_case_evidence": {c["connected_card_key"]: {"direct_cases": [], "connected_cases": []} for c in connected},
+    })
+    result = run(wf.investigate({"type": "case_id", "value": "HHG-001"}, call_tool=call_tool))
+    assert len(result["tool_calls"]) == 5  # resolution + combined_evidence + 3 follow-ups; unchanged ceiling
+    assert result["pattern_evidence"]["matched"] is True
+
+
+def test_assess_result_is_independent_of_r5_evidence():
+    # R5 matches, but nothing else in the evidence qualifies for G1's own
+    # escalate/monitor tiers -- the recommendation must still be
+    # insufficient_evidence, proving R5 evidence never leaks into _assess().
+    evidence = _base_evidence(temporal_activity=_R5_MATCHING_TEMPORAL_ACTIVITY)
+    call_tool = make_call_tool({"combined_evidence": evidence})
+    result = run(wf.investigate({"type": "flagged_txn_id", "value": 1}, call_tool=call_tool))
+    assert result["pattern_evidence"]["matched"] is True
+    assert result["recommendation"] == "insufficient_evidence"
+    assert result["recommendation_basis"]["reasons"] == []

@@ -471,3 +471,124 @@ def test_canonical_order_preserved_with_r6_actions_recommended():
     reconstructed = tuple(sorted(all_actions, key=g2.CANONICAL_ACTION_ORDER.index))
     assert reconstructed == g2.CANONICAL_ACTION_ORDER
     assert len(all_actions) == 14
+
+
+# --- G5-B: R5 (card_testing) tests ---
+
+_R5_MATCHED = {
+    "matched": True,
+    "pattern": "card_testing",
+    "candidates": [
+        {
+            "authorization_txn_ids": [1, 2, 3],
+            "authorization_count": 3,
+            "authorization_span_minutes": 10.0,
+            "larger_purchase_txn_id": 4,
+            "larger_purchase_amount": 150.0,  # > $100, relevant to the BLOCK_CARD test below
+        }
+    ],
+    "uncertainty": ["No numeric definition of 'small' is asserted -- ..."],
+}
+_R5_NOT_MATCHED = {"matched": False, "pattern": "card_testing", "candidates": [], "uncertainty": []}
+
+
+def test_r5_matched_recommends_decline_transaction_route_l1():
+    ledger = _base_ledger(pattern_evidence=_R5_MATCHED)
+    result = g2.evaluate(ledger)
+    entry = next(e for e in result["recommended"] if e["action"] == "DECLINE_TRANSACTION")
+    assert entry["route"] == "L1"
+    assert entry["reason"].startswith("R5")
+    assert not any(e["action"] == "DECLINE_TRANSACTION" for e in result["deferred"])
+
+
+def test_r5_matched_recommends_step_up_auth_route_auto():
+    ledger = _base_ledger(pattern_evidence=_R5_MATCHED)
+    result = g2.evaluate(ledger)
+    entry = next(e for e in result["recommended"] if e["action"] == "STEP_UP_AUTH")
+    assert entry["route"] == "auto"
+    assert entry["reason"].startswith("R5")
+
+
+def test_r5_absent_leaves_decline_transaction_and_step_up_auth_deferred():
+    ledger = _base_ledger()  # no pattern_evidence key at all -- the common, unwired-gate case
+    result = g2.evaluate(ledger)
+    for action in ("DECLINE_TRANSACTION", "STEP_UP_AUTH"):
+        assert any(e["action"] == action for e in result["deferred"])
+        assert not any(e["action"] == action for e in result["recommended"])
+
+
+def test_r5_not_matched_explicitly_leaves_both_deferred():
+    ledger = _base_ledger(pattern_evidence=_R5_NOT_MATCHED)
+    result = g2.evaluate(ledger)
+    for action in ("DECLINE_TRANSACTION", "STEP_UP_AUTH"):
+        assert any(e["action"] == action for e in result["deferred"])
+
+
+def test_block_card_remains_deferred_even_with_r5_match_over_100():
+    # The candidate's larger_purchase_amount ($150.0) exceeds R5's own
+    # literal $100 escalation figure, but exposure_usd still doesn't
+    # exist -- BLOCK_CARD must stay DEFERRED, never RECOMMENDED.
+    ledger = _base_ledger(pattern_evidence=_R5_MATCHED)
+    result = g2.evaluate(ledger)
+    assert any(e["action"] == "BLOCK_CARD" for e in result["deferred"])
+    assert not any(e["action"] == "BLOCK_CARD" for e in result["recommended"])
+    reason = next(e for e in result["deferred"] if e["action"] == "BLOCK_CARD")["reason"]
+    assert "exposure_usd" in reason
+
+
+def test_block_all_cards_still_prohibited_with_r5_match():
+    ledger = _base_ledger(pattern_evidence=_R5_MATCHED)
+    result = g2.evaluate(ledger)
+    assert any(e["action"] == "BLOCK_ALL_CARDS" for e in result["prohibited"])
+    assert not any(e["action"] == "BLOCK_ALL_CARDS" for e in result["recommended"])
+
+
+def test_canonical_order_preserved_with_r5_actions_recommended():
+    ledger = _base_ledger(pattern_evidence=_R5_MATCHED)
+    result = g2.evaluate(ledger)
+    all_actions = [e["action"] for bucket in ("recommended", "prohibited", "eligible_not_recommended", "deferred") for e in result[bucket]]
+    reconstructed = tuple(sorted(all_actions, key=g2.CANONICAL_ACTION_ORDER.index))
+    assert reconstructed == g2.CANONICAL_ACTION_ORDER
+    assert len(all_actions) == 14
+
+
+def test_four_state_model_unchanged_with_r5_evidence():
+    ledger = _base_ledger(pattern_evidence=_R5_MATCHED)
+    result = g2.evaluate(ledger)
+    assert set(result.keys()) == {
+        "investigation_recommendation", "recommended", "prohibited",
+        "eligible_not_recommended", "deferred", "uncertainties",
+    }
+    # no action ever appears in more than one bucket
+    seen = set()
+    for bucket in ("recommended", "prohibited", "eligible_not_recommended", "deferred"):
+        for e in result[bucket]:
+            assert e["action"] not in seen
+            seen.add(e["action"])
+
+
+def test_hhg_011_real_r5_detector_output_grounds_decline_and_step_up_auth():
+    # Real, already-verified G5-A output for HHG-011 (card C11923:21363) --
+    # 22 candidates, unranked, exactly as classify_card_testing actually
+    # produces it. No candidate is singled out as "best"; matched=True
+    # alone is what G2 consumes here.
+    from src.investigation.patterns import classify_card_testing
+
+    temporal = [
+        {"TransactionID": 3580907, "ts": "2016-12-28 03:33:38", "TransactionAmt": 16.17, "channel": "online"},
+        {"TransactionID": 3580933, "ts": "2016-12-28 03:57:10", "TransactionAmt": 23.78, "channel": "online"},
+        {"TransactionID": 3580951, "ts": "2016-12-28 04:21:00", "TransactionAmt": 52.17, "channel": "online"},
+        {"TransactionID": 3582082, "ts": "2016-12-28 18:54:14", "TransactionAmt": 62.11, "channel": "online"},
+        {"TransactionID": 3583411, "ts": "2016-12-29 04:13:36", "TransactionAmt": 6.33, "channel": "online"},
+        {"TransactionID": 3583415, "ts": "2016-12-29 04:16:10", "TransactionAmt": 6.39, "channel": "online"},
+        {"TransactionID": 3583417, "ts": "2016-12-29 04:22:35", "TransactionAmt": 6.35, "channel": "online"},
+        {"TransactionID": 3583670, "ts": "2016-12-29 13:23:32", "TransactionAmt": 227.32, "channel": "online"},
+    ]
+    real_pattern_evidence = classify_card_testing(temporal, flagged_txn_id=3583368)
+    assert real_pattern_evidence["matched"] is True
+    assert len(real_pattern_evidence["candidates"]) > 1  # genuinely multiple, unranked
+
+    ledger = _base_ledger(pattern_evidence=real_pattern_evidence)
+    result = g2.evaluate(ledger)
+    assert any(e["action"] == "DECLINE_TRANSACTION" and e["route"] == "L1" for e in result["recommended"])
+    assert any(e["action"] == "STEP_UP_AUTH" and e["route"] == "auto" for e in result["recommended"])

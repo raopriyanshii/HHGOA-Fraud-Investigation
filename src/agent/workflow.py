@@ -27,6 +27,7 @@ import uuid
 from typing import Any, Awaitable, Callable
 
 from src.graph.tigergraph_connection import scrub_secret
+from src.investigation.patterns import classify_card_testing
 from src.mcp_server.server import mcp
 
 MAX_FOLLOW_UP_CARDS = 3
@@ -154,7 +155,15 @@ def _assess(evidence: dict, round2: list[tuple[str, int, dict | None]]) -> tuple
     return "insufficient_evidence", {"reasons": [], "tool_call_orders": []}
 
 
-def _finalize(investigation_id: str, trigger: dict, tool_calls: list, uncertainties: list, recommendation: str, basis: dict) -> dict:
+def _finalize(
+    investigation_id: str,
+    trigger: dict,
+    tool_calls: list,
+    uncertainties: list,
+    recommendation: str,
+    basis: dict,
+    pattern_evidence: dict | None = None,
+) -> dict:
     return {
         "investigation_id": investigation_id,
         "trigger": trigger,
@@ -162,6 +171,7 @@ def _finalize(investigation_id: str, trigger: dict, tool_calls: list, uncertaint
         "uncertainties": uncertainties,
         "recommendation": recommendation,
         "recommendation_basis": basis,
+        "pattern_evidence": pattern_evidence,
     }
 
 
@@ -269,4 +279,15 @@ async def investigate(trigger: dict, *, window_hours: float = 24.0, call_tool: C
     if combined_order not in basis["tool_call_orders"] and recommendation in ("escalate", "monitor"):
         basis["tool_call_orders"] = sorted(set(basis["tool_call_orders"]) | {combined_order})
 
-    return _finalize(investigation_id, trigger, tool_calls, uncertainties, recommendation, basis)
+    # --- R5 card-testing evidence (G5-B) ---
+    # Pure local Python analysis over temporal_activity that combined_evidence
+    # already returned -- zero MCP/tool calls, no effect on the 5-call
+    # ceiling. Computed AFTER _assess() has already run and returned, so
+    # this evidence structurally cannot influence G1's own
+    # escalate/monitor/insufficient_evidence tier above -- it is separate
+    # evidence for G2's policy layer to consume, not part of G1's own
+    # recommendation. Not recorded as a tool_calls entry, since no tool
+    # was called.
+    pattern_evidence = classify_card_testing(evidence.get("temporal_activity") or [], flagged_txn_id)
+
+    return _finalize(investigation_id, trigger, tool_calls, uncertainties, recommendation, basis, pattern_evidence)

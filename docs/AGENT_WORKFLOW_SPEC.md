@@ -161,6 +161,36 @@ strength whenever Q9 isn't relevant, rather than weakening Round 2
 unconditionally (Option A) or introducing an unprincipled exclusion
 (Option C).
 
+### 4b. G5-B addition — R5 `pattern_evidence` (local, zero-cost) (finalized)
+
+G5-A/G5-B added one more piece of evidence to the ledger,
+`pattern_evidence`, produced by `src.investigation.patterns.classify_card_testing`
+over `temporal_activity` — the same list `combined_evidence` already
+returns. This is **not** an MCP/tool call: `classify_card_testing` makes
+no network call of any kind, so it costs nothing against the 5-call
+ceiling documented above, and the call-count table in this section is
+completely unaffected — `_ALLOWED_TOOLS`, `MAX_FOLLOW_UP_CARDS`, and the
+Q9-gate arithmetic in §4a are all untouched.
+
+It is computed *after* `_assess()` (§6a) has already run and returned,
+specifically so it structurally cannot influence G1's own
+escalate/monitor/insufficient_evidence tier — it is separate evidence for
+G2's policy layer to consume, not part of G1's own recommendation.
+`classify_card_testing` reports every structurally-qualifying candidate
+sequence it finds, unranked (no "best" or "strongest" selection), never
+asserting a numeric dollar value for "small" — see
+`src/investigation/patterns.py`'s own docstring for the full detection
+rule.
+
+G2 consumes `pattern_evidence["matched"]` to ground exactly the two R5
+actions the organizer wording supports without any missing information:
+`DECLINE_TRANSACTION` (route `L1`) and `STEP_UP_AUTH` (route `auto`).
+`BLOCK_CARD` remains `DEFERRED` — R5's own ">$100, already cleared"
+escalation clause is checkable from `pattern_evidence`, but `BLOCK_CARD`'s
+required route (`L1` vs `L2`) depends on `exposure_usd`, which does not
+exist anywhere in this system and is not invented to work around the gap.
+`BLOCK_ALL_CARDS`/R10 is entirely unaffected by any of this.
+
 ## 5. Follow-up card selection — deterministic rule (finalized)
 
 The agent must not choose which connected cards to look up based on any

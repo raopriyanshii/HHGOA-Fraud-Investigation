@@ -46,21 +46,28 @@ DEFERRED = "DEFERRED"
 # the documented, final determination for V1, not a placeholder.
 _DEFERRED_REASONS = {
     "ALLOW_TRANSACTION": "no policy rule cites a positive trigger condition for this action",
-    "DECLINE_TRANSACTION": "R1/R4/R5 require fraud_probability or a customer-reply state, not computed by G1/G2",
     "MONITOR_CARD": "R4 requires a no-reply state, not tracked by G1/G2",
     "WARN_CUSTOMER": "R7 requires a customer response and a recurring-pattern match, not available",
     "VERIFY_WITH_CUSTOMER": "R1 requires fraud_probability, not computed by G1/G2",
-    "STEP_UP_AUTH": "R1/R5 require fraud_probability or a card-testing pattern, not available",
-    "BLOCK_CARD": "R1/R2/R5 require fraud_probability or a customer response, not available",
+    "BLOCK_CARD": (
+        "R5's >$100-cleared-purchase trigger condition can be checked once pattern_evidence "
+        "exists, but BLOCK_CARD's required route (L1 vs L2) depends on exposure_usd, which "
+        "remains unavailable; R1/R2 also require fraud_probability or a customer response, "
+        "neither available either -- BLOCK_CARD remains DEFERRED regardless of R5 evidence"
+    ),
     "GENERATE_REPORT": "no policy rule cites a positive trigger condition for this action",
     "ESCALATE_TO_ANALYST": "R8/R9 require fraud_probability and exposure_usd, or pattern judgment, none available",
     "CLOSE_NO_FRAUD": "R3 requires a customer confirmation response, not available",
 }
-# MONITOR_CONNECTED_CARDS and FILE_REPORT moved out of this table -- they
-# now have dedicated evaluators (_evaluate_monitor_connected_cards,
-# _evaluate_file_report) below, the same pattern CREATE_CASE and
-# BLOCK_ALL_CARDS already use, since R6 makes them conditionally
-# RECOMMENDED rather than unconditionally DEFERRED.
+# MONITOR_CONNECTED_CARDS, FILE_REPORT, DECLINE_TRANSACTION, and
+# STEP_UP_AUTH are not in this table -- they have dedicated evaluators
+# below (the same pattern CREATE_CASE and BLOCK_ALL_CARDS already use),
+# since R6/R5 make them conditionally RECOMMENDED rather than
+# unconditionally DEFERRED. BLOCK_CARD stays here: its trigger is
+# partially checkable via R5 now, but its route can never be determined
+# without exposure_usd, so it is unconditionally DEFERRED regardless of
+# ledger content -- a static reason is accurate, a dedicated evaluator
+# would not change the outcome and is not added.
 
 
 def _r6_evidence_present(ledger: dict) -> bool:
@@ -87,6 +94,23 @@ def _r6_evidence_present(ledger: dict) -> bool:
                         if entry.get("has_confirmed_fraud"):
                             return True
     return False
+
+
+def _r5_evidence_present(ledger: dict) -> bool:
+    """R5 (organizer Fraud Policy): "Three or more small online
+    authorizations on one card within an hour, followed by a larger
+    purchase." Sufficient ONLY when G1's `pattern_evidence` field (from
+    src.investigation.patterns.classify_card_testing -- pure local
+    analysis after combined_evidence, zero tool calls) reports
+    matched == True. Does not rank, score, or select among multiple
+    candidates G5-A may have found; any match is enough, since R5's base
+    clause ("recommend DECLINE_TRANSACTION and STEP_UP_AUTH") attaches no
+    further condition beyond the sequence existing. Never reads
+    risk_score. Never infers a dollar threshold -- classify_card_testing
+    itself never asserts one, and this function does not either.
+    """
+    pattern_evidence = ledger.get("pattern_evidence") or {}
+    return bool(pattern_evidence.get("matched"))
 
 
 def _get_trigger_type(ledger: dict) -> tuple[str | None, str]:
@@ -157,6 +181,26 @@ def _evaluate_file_report(ledger: dict) -> tuple[str, str | None, str]:
     )
 
 
+def _evaluate_decline_transaction(ledger: dict) -> tuple[str, str | None, str]:
+    if _r5_evidence_present(ledger):
+        return RECOMMENDED, "L1", "R5: three or more small online authorizations within an hour, followed by a larger purchase"
+    return (
+        DEFERRED,
+        None,
+        "R1/R4/R5 require fraud_probability, a customer-reply state, or a matched card-testing sequence; none available",
+    )
+
+
+def _evaluate_step_up_auth(ledger: dict) -> tuple[str, str | None, str]:
+    if _r5_evidence_present(ledger):
+        return RECOMMENDED, "auto", "R5: three or more small online authorizations within an hour, followed by a larger purchase"
+    return (
+        DEFERRED,
+        None,
+        "R1/R5 require fraud_probability or a matched card-testing sequence; none available",
+    )
+
+
 def _evaluate_block_all_cards(ledger: dict) -> tuple[str, str | None, str]:
     # Unconditional in V1: R10's exception can never be confirmed true from
     # G1's evidence (see module docstring / spec Revision 2), regardless of
@@ -197,6 +241,10 @@ def evaluate(ledger: dict) -> dict:
             state, route, reason = _evaluate_monitor_connected_cards(ledger)
         elif action == "FILE_REPORT":
             state, route, reason = _evaluate_file_report(ledger)
+        elif action == "DECLINE_TRANSACTION":
+            state, route, reason = _evaluate_decline_transaction(ledger)
+        elif action == "STEP_UP_AUTH":
+            state, route, reason = _evaluate_step_up_auth(ledger)
         else:
             state, route, reason = DEFERRED, None, _DEFERRED_REASONS[action]
 
