@@ -367,3 +367,110 @@ def q8_combined_evidence(conn, flagged_txn_id: int, window_hours: float = 24.0) 
         "connected_cards": connected,
         "billing_region": billing,
     }
+
+
+# ---------------------------------------------------------------------------
+# Q9 -- Cross-card fraud verification (G3, additive -- does not touch Q1-Q8)
+#
+# Unlike q5_connected_cards's connected_via_case (HHG_CONNECTED_TO, a case
+# already formally linking cards) or connected_via_device (a flat list with
+# no per-card fraud check), this answers a different, specific question:
+# for cards sharing a non-hub device or billing region with the given card,
+# does *that other card* have its own independently confirmed-fraud
+# history, and does it belong to the same customer or a different one?
+# This is the evidence policy rule R6 needs and G1/G2 did not previously
+# gather. It never touches HHG_CONNECTED_TO -- case-based ring evidence
+# and shared-element evidence stay in separate tools, on purpose (spec
+# docs/CROSS_CARD_FRAUD_VERIFICATION_SPEC.md, point D).
+#
+# Both paths below resolve the input card's own customer_id and enrich
+# every other card with its customer_id and confirmed-fraud case ids in
+# ONE server-side traversal each (two total calls, not one per discovered
+# card) -- the same batched-traversal discipline Phase E's Q5 fix
+# established, reused here rather than reinvented.
+# ---------------------------------------------------------------------------
+
+_Q9_VIA_DEVICE_GSQL = """
+INTERPRET QUERY (VERTEX<HHG_Card> input_card) FOR GRAPH HHGOA_FraudInvestigation {
+  SetAccum<STRING> @confirmed_fraud_case_ids;
+  MaxAccum<STRING> @customer_id_val;
+
+  Start = {input_card};
+  StartCust = SELECT cu FROM Start:s -(HHG_OWNS_reverse:e)-> HHG_Customer:cu;
+  Txns = SELECT t FROM Start:s -(HHG_MADE:e)-> HHG_Transaction:t;
+  Devices = SELECT d FROM Txns:t -(HHG_FROM_DEVICE:e)-> HHG_DeviceProfile:d
+            WHERE d.hub_flag == FALSE;
+  OtherTxns = SELECT t2 FROM Devices:d -(HHG_FROM_DEVICE_reverse:e)-> HHG_Transaction:t2;
+  OtherCards = SELECT c FROM OtherTxns:t2 -(HHG_MADE_reverse:e)-> HHG_Card:c
+               WHERE c != input_card;
+  OtherCardsWithCustomer = SELECT c FROM OtherCards:c -(HHG_OWNS_reverse:e)-> HHG_Customer:cu
+                           ACCUM c.@customer_id_val = cu.customer_id;
+  OtherCardsWithCases = SELECT c FROM OtherCards:c -(HHG_ON_CARD_reverse:e)-> HHG_ClosedCase:cc
+                        WHERE cc.outcome == "confirmed_fraud"
+                        ACCUM c.@confirmed_fraud_case_ids += cc.case_id;
+  PRINT StartCust, OtherCards;
+}
+"""
+
+_Q9_VIA_REGION_GSQL = """
+INTERPRET QUERY (VERTEX<HHG_Card> input_card) FOR GRAPH HHGOA_FraudInvestigation {
+  SetAccum<STRING> @confirmed_fraud_case_ids;
+  MaxAccum<STRING> @customer_id_val;
+
+  Start = {input_card};
+  StartCust = SELECT cu FROM Start:s -(HHG_OWNS_reverse:e)-> HHG_Customer:cu;
+  Txns = SELECT t FROM Start:s -(HHG_MADE:e)-> HHG_Transaction:t;
+  Regions = SELECT r FROM Txns:t -(HHG_BILLED_IN:e)-> HHG_BillingRegion:r
+            WHERE r.hub_flag == FALSE;
+  OtherTxns = SELECT t2 FROM Regions:r -(HHG_BILLED_IN_reverse:e)-> HHG_Transaction:t2;
+  OtherCards = SELECT c FROM OtherTxns:t2 -(HHG_MADE_reverse:e)-> HHG_Card:c
+               WHERE c != input_card;
+  OtherCardsWithCustomer = SELECT c FROM OtherCards:c -(HHG_OWNS_reverse:e)-> HHG_Customer:cu
+                           ACCUM c.@customer_id_val = cu.customer_id;
+  OtherCardsWithCases = SELECT c FROM OtherCards:c -(HHG_ON_CARD_reverse:e)-> HHG_ClosedCase:cc
+                        WHERE cc.outcome == "confirmed_fraud"
+                        ACCUM c.@confirmed_fraud_case_ids += cc.case_id;
+  PRINT StartCust, OtherCards;
+}
+"""
+
+
+def _extract_cross_card_results(other_cards_raw: list, input_customer_id: str) -> list:
+    seen = set()
+    out = []
+    for c in other_cards_raw:
+        attrs = c["attributes"]
+        card_key = attrs["card_key"]
+        if card_key in seen:
+            continue
+        seen.add(card_key)
+        customer_id = attrs.get("@customer_id_val")
+        fraud_ids = sorted(attrs.get("@confirmed_fraud_case_ids") or [])
+        out.append({
+            "card_key": card_key,
+            "customer_id": customer_id,
+            "same_customer": customer_id == input_customer_id,
+            "has_confirmed_fraud": len(fraud_ids) > 0,
+            "confirmed_fraud_case_ids": fraud_ids,
+        })
+    return out
+
+
+def _run_cross_card_path(conn, gsql: str, card_key: str) -> dict | None:
+    result = _run(conn, gsql, {"input_card": card_key})
+    start_cust = _vset(result, "StartCust")
+    if not start_cust:
+        return None
+    input_customer_id = start_cust[0]["attributes"]["customer_id"]
+    other_cards_raw = _vset(result, "OtherCards")
+    other_cards = _extract_cross_card_results(other_cards_raw, input_customer_id)
+    if not other_cards:
+        return None
+    return {"other_cards": other_cards}
+
+
+def q9_cross_card_fraud_verification(conn, card_key: str) -> dict:
+    return {
+        "via_device": _run_cross_card_path(conn, _Q9_VIA_DEVICE_GSQL, card_key),
+        "via_region": _run_cross_card_path(conn, _Q9_VIA_REGION_GSQL, card_key),
+    }

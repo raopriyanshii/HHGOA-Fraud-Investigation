@@ -79,5 +79,11 @@ def combined_evidence(flagged_txn_id: int, window_hours: float = 24.0) -> dict |
     return _safe_call(q.q8_combined_evidence, flagged_txn_id, window_hours)
 
 
+@mcp.tool()
+def cross_card_fraud_verification(card_key: str) -> dict[str, Any]:
+    """Q9: cards sharing a non-hub device or billing region with the given card, each tagged with same_customer and its own confirmed-fraud status."""
+    return _safe_call(q.q9_cross_card_fraud_verification, card_key)
+
+
 if __name__ == "__main__":
     mcp.run()
