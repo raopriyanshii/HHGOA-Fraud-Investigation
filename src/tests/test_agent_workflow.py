@@ -452,3 +452,27 @@ def test_assess_result_is_independent_of_r5_evidence():
     assert result["pattern_evidence"]["matched"] is True
     assert result["recommendation"] == "insufficient_evidence"
     assert result["recommendation_basis"]["reasons"] == []
+
+
+# --- G7: full_evidence (untrimmed, reasoning-layer support) ---
+
+def test_full_evidence_carries_untrimmed_combined_evidence():
+    many_devices = [{"card_key": f"C{i:05d}:1", "customer_id": f"C{i:05d}"} for i in range(200)]
+    evidence = _base_evidence(device_evidence={"hub_flag": False, "n_distinct_customers": 200, "cards": many_devices})
+    call_tool = make_call_tool({"combined_evidence": evidence, "cross_card_fraud_verification": {"via_device": None, "via_region": None}})
+    result = run(wf.investigate({"type": "flagged_txn_id", "value": 1}, call_tool=call_tool))
+    # the ledger's own tool_calls entry is trimmed (per the existing test
+    # above), but full_evidence must carry the real, untrimmed value:
+    full_cards = result["full_evidence"]["combined_evidence"]["device_evidence"]["cards"]
+    assert len(full_cards) == 200
+
+
+def test_full_evidence_carries_cross_card_result_only_when_q9_fires():
+    evidence_gate_true = _base_evidence(device_evidence={"hub_flag": False, "n_distinct_customers": 3, "cards": []})
+    call_tool = make_call_tool({"combined_evidence": evidence_gate_true, "cross_card_fraud_verification": {"via_device": None, "via_region": None}})
+    result = run(wf.investigate({"type": "flagged_txn_id", "value": 1}, call_tool=call_tool))
+    assert result["full_evidence"]["cross_card_fraud_verification"] == {"via_device": None, "via_region": None}
+
+    call_tool = make_call_tool({"combined_evidence": _base_evidence()})  # hub-flagged billing_region -> gate stays False
+    result = run(wf.investigate({"type": "flagged_txn_id", "value": 1}, call_tool=call_tool))
+    assert result["full_evidence"]["cross_card_fraud_verification"] is None

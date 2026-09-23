@@ -163,6 +163,7 @@ def _finalize(
     recommendation: str,
     basis: dict,
     pattern_evidence: dict | None = None,
+    full_evidence: dict | None = None,
 ) -> dict:
     return {
         "investigation_id": investigation_id,
@@ -172,6 +173,7 @@ def _finalize(
         "recommendation": recommendation,
         "recommendation_basis": basis,
         "pattern_evidence": pattern_evidence,
+        "full_evidence": full_evidence,
     }
 
 
@@ -238,6 +240,7 @@ async def investigate(trigger: dict, *, window_hours: float = 24.0, call_tool: C
     )
 
     effective_follow_up_cap = MAX_FOLLOW_UP_CARDS
+    cross_card = None  # stays None unless the Q9 gate fires below; carried into full_evidence either way
     if q9_gate:
         card_key_for_q9 = evidence["card"]["card_key"]
         q9_order = order
@@ -290,4 +293,15 @@ async def investigate(trigger: dict, *, window_hours: float = 24.0, call_tool: C
     # was called.
     pattern_evidence = classify_card_testing(evidence.get("temporal_activity") or [], flagged_txn_id)
 
-    return _finalize(investigation_id, trigger, tool_calls, uncertainties, recommendation, basis, pattern_evidence)
+    # --- full_evidence (G7 reasoning-layer support) ---
+    # Additive only: tool_calls entries above already went through _trim()
+    # for ledger compactness, which collapses any list past
+    # _MAX_LIST_SAMPLE (5) into {count, sample} -- fine for an audit log,
+    # not enough for a reasoning layer to ground transaction-ID citations
+    # against (HHG-011 alone has >20 distinct online transactions in one
+    # window). This carries the same combined_evidence/cross_card_fraud_
+    # verification results already computed above, untouched by _trim.
+    # No existing key changes; nothing here triggers another tool call.
+    full_evidence = {"combined_evidence": evidence, "cross_card_fraud_verification": cross_card}
+
+    return _finalize(investigation_id, trigger, tool_calls, uncertainties, recommendation, basis, pattern_evidence, full_evidence)

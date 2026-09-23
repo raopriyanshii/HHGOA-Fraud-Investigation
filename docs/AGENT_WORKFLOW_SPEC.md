@@ -517,6 +517,30 @@ Requirements on this record:
   the recommendation (missing device evidence, a failed tool call, an
   empty ring, etc.) — stated, not hidden.
 
+### 8b. G7 addition — `full_evidence` (untrimmed, reasoning-layer support) (finalized)
+
+The ledger's top-level record gained one additive key, `full_evidence`:
+
+```json
+{
+  "full_evidence": {
+    "combined_evidence": "the untrimmed dict returned by the single combined_evidence call, never passed through _trim()",
+    "cross_card_fraud_verification": "the untrimmed cross_card_fraud_verification result if the Q9 gate fired, else null"
+  }
+}
+```
+
+Reason: Section 8's `tool_calls[].curated_result_summary` entries are
+intentionally `_trim()`-collapsed for ledger compactness (any list past 5
+entries becomes `{count, sample}`). That is correct for an audit log, but
+it is not enough for a reasoning layer (Section 13) to ground its
+transaction-ID citations against — a real case (HHG-011) has more than 20
+distinct online transactions in one 24h window, and a trimmed sample would
+hide most of them. `full_evidence` is purely additive: no existing key
+changed shape or meaning, no existing test asserts an exhaustive key-set on
+the ledger, and it costs zero additional tool calls — it carries results
+already computed during the same investigation.
+
 ## 9. Separation of concerns (finalized, non-negotiable)
 
 The LLM/agent reasons over evidence already returned by MCP tool calls. It
@@ -572,3 +596,65 @@ draft (workflow shape, follow-up cap, recommendation vocabulary, directory
 placement). Section 6a resolves the one item that draft explicitly left
 open afterward: the fixed rule mapping evidence to a recommendation label.
 No design dependency remains before Phase G implementation can start.
+
+## 13. G7 addition — LLM reasoning layer (finalized)
+
+Three new, isolated modules, none of which modify G1/G2/G5-A's own logic:
+
+- `src/agent/reasoning.py` — builds the curated evidence package (FACTS /
+  DETERMINISTIC FINDINGS / REASONING-ALLOWED / UNKNOWN, per this section's
+  own boundary) and the prompt from it; invokes an injectable `call_llm`
+  (same pattern as `workflow.py`'s `call_tool` injection — no default
+  provider is wired in, and tests never depend on a live LLM); parses the
+  response as JSON. Performs no semantic validation.
+- `src/agent/reasoning_validator.py` — the deterministic acceptance gate.
+  The LLM's raw JSON is never trusted directly: every entity ID it returns
+  is checked against the evidence package's `known_ids` (built from
+  `full_evidence`, Section 8b) and stripped if not grounded, never
+  re-verified against TigerGraph and never silently swapped for another
+  ID. Enforces the two deterministic overrides Section 9 requires: a
+  positive R5 match (`pattern_evidence.matched`) forces `pattern =
+  "card_testing"` regardless of the LLM's opinion, and the LLM asserting
+  `card_testing` when R5 did *not* match is rejected outright (the same
+  violation in the other direction). `exposure_usd` is always computed
+  here, as a pure sum of absolute amounts over the final grounded ID list
+  — the LLM never determines it directly.
+- `src/agent/case_output.py` — the output adapter. Combines the ledger,
+  the G2 policy result, and the validated reasoning output into the
+  `case` and `next_best_actions` objects. `next_best_actions` is built
+  entirely from G2's own `recommended` bucket — `prohibited`/`deferred`
+  are never read here, which is what structurally guarantees a
+  `PROHIBITED` action (e.g. `BLOCK_ALL_CARDS`) can never reach this
+  output, let alone through the LLM. `similar_prior_cases` is likewise
+  fully deterministic (confirmed-fraud entries from Q4's already-retrieved
+  historical cases) — the LLM is never asked to select or invent case IDs.
+
+Call-budget: this layer makes exactly one external call (`call_llm`) and
+zero MCP/TigerGraph calls, by construction — nothing in `reasoning.py`,
+`reasoning_validator.py`, or `case_output.py` imports
+`src.graph.tigergraph_connection.get_connection` or
+`src.mcp_server.server.mcp`. Verified by an active monkeypatch-based test
+(`test_zero_mcp_tigergraph_calls_is_an_active_guard_not_an_inference`), not
+just inferred from call counts. Section 4's ≤5-call ceiling governs
+graph/tool calls only and is unaffected. The one `call_llm` call is bounded
+by an explicit, configurable timeout (`reasoning.DEFAULT_LLM_TIMEOUT_S`,
+60s, via `asyncio.wait_for`) — a non-responding provider cannot hang an
+investigation indefinitely; a timed-out call fails exactly like any other
+LLM failure (`failure_reason: "llm_timeout"`) and never reaches
+`assemble_case`.
+
+Failure handling: any LLM failure (call error, timeout, non-JSON response,
+non-object JSON, missing keys, invalid enum, out-of-range probability, or
+an entity ID that fails grounding entirely) produces an explicit `{"ok":
+false, "failure_reason": ..., "stop_reason": ...}` result from
+`case_output.investigate_and_assemble` — never a fabricated `case` object.
+`stop_reason` is present on the success path too, built only from
+vocabulary this project already established (G1's own `recommendation`
+value and the reasoning layer's own validated `verdict`) — no new semantic
+meaning invented for the field.
+
+Deliberately out of scope this phase (not invented here): `sar`,
+`evidence_requests`, `tool_calls`/`tokens`/`latency_s`, `connected_card_ids`,
+`connected_device_profiles`, `written_to_graph`, `graph_case_id`, `case_id`
+at the top level, and any `next_best_actions` evolution beyond `initial ==
+final` (no evidence-request/response loop exists yet).
