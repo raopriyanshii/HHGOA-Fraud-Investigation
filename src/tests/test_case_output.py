@@ -9,6 +9,7 @@ import asyncio
 import json
 
 from src.agent import case_output as co
+from src.policy import g2_policy
 
 
 def run(coro):
@@ -250,3 +251,119 @@ def test_output_contract_holds_across_representative_verdicts():
         assert isinstance(case["similar_prior_cases"], list)
         assert "next_best_actions" in outcome
         assert set(outcome["next_best_actions"].keys()) == {"initial", "final", "what_changed"}
+
+
+# --- G11-D: post-reasoning ("final") G2 pass wired into investigate_and_assemble ---
+
+def test_final_next_best_actions_reflects_post_reasoning_g2_pass():
+    ledger = _base_ledger()  # no tool_calls, no cross_card evidence -- nothing fires pre-reasoning
+    g2_result = g2_policy.evaluate(ledger)
+    assert g2_result["recommended"] == []
+
+    call_llm = _fake_call_llm(_valid_llm_response(fraud_probability=0.5))  # clears the section-3a 0.30 threshold
+    outcome = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm))
+    assert outcome["ok"] is True
+    nba = outcome["next_best_actions"]
+    assert nba["initial"] == []
+    assert any(a["action"] == "CREATE_CASE" for a in nba["final"])
+    assert nba["what_changed"] != "nothing"
+    assert "CREATE_CASE" in nba["what_changed"]
+
+
+def test_what_changed_is_nothing_when_final_equals_initial():
+    ledger = _base_ledger()
+    g2_result = g2_policy.evaluate(ledger)
+    call_llm = _fake_call_llm(_valid_llm_response(verdict="legitimate", fraud_probability=0.1))  # below every new threshold
+    outcome = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm))
+    assert outcome["ok"] is True
+    nba = outcome["next_best_actions"]
+    assert nba["initial"] == nba["final"]
+    assert nba["what_changed"] == "nothing"
+
+
+def test_what_changed_is_deterministic_across_repeated_calls():
+    ledger = _base_ledger()
+    g2_result = g2_policy.evaluate(ledger)
+    call_llm = _fake_call_llm(_valid_llm_response(fraud_probability=0.5))
+    outcome_1 = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm))
+    outcome_2 = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm))
+    assert outcome_1["next_best_actions"] == outcome_2["next_best_actions"]
+
+
+def test_final_g2_pass_evaluated_exactly_once_on_success(monkeypatch):
+    real_evaluate = g2_policy.evaluate
+    calls = []
+
+    def counting_evaluate(ledger, validated=None):
+        calls.append(validated)
+        return real_evaluate(ledger, validated)
+
+    monkeypatch.setattr(co.g2_policy, "evaluate", counting_evaluate)
+
+    ledger = _base_ledger()
+    call_llm = _fake_call_llm(_valid_llm_response())
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    assert outcome["ok"] is True
+    assert len(calls) == 1  # investigate_and_assemble calls g2_policy.evaluate exactly once itself
+    assert calls[0] is not None  # always the post-reasoning call, with validated
+
+
+def test_final_g2_pass_not_evaluated_when_llm_call_fails(monkeypatch):
+    calls = []
+    monkeypatch.setattr(co.g2_policy, "evaluate", lambda *a, **k: calls.append((a, k)))
+
+    async def failing_call_llm(prompt):
+        raise RuntimeError("simulated provider failure")
+
+    outcome = run(co.investigate_and_assemble(_base_ledger(), _base_g2_result(), call_llm=failing_call_llm))
+    assert outcome["ok"] is False
+    assert calls == []
+
+
+def test_final_g2_pass_not_evaluated_when_validation_fails(monkeypatch):
+    calls = []
+    monkeypatch.setattr(co.g2_policy, "evaluate", lambda *a, **k: calls.append((a, k)))
+
+    call_llm = _fake_call_llm(_valid_llm_response(verdict="definitely_fraud"))  # rejected by reasoning_validator
+    outcome = run(co.investigate_and_assemble(_base_ledger(), _base_g2_result(), call_llm=call_llm))
+    assert outcome["ok"] is False
+    assert calls == []
+
+
+def test_post_reasoning_g2_pass_makes_zero_mcp_or_tigergraph_calls(monkeypatch):
+    from src.graph import tigergraph_connection as tgc
+    from src.mcp_server import server as mcp_server_module
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("post-reasoning G2 pass must never call TigerGraph/MCP directly")
+
+    monkeypatch.setattr(tgc, "get_connection", _fail_if_called)
+    monkeypatch.setattr(mcp_server_module.mcp, "call_tool", _fail_if_called)
+
+    ledger = _base_ledger()
+    g2_result = g2_policy.evaluate(ledger)
+    call_llm = _fake_call_llm(_valid_llm_response(fraud_probability=0.9))  # exercises the new section-3a branch
+    outcome = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm))
+    assert outcome["ok"] is True  # would have raised above if either entry point were touched
+    assert any(a["action"] == "CREATE_CASE" for a in outcome["next_best_actions"]["final"])
+
+
+def test_next_best_actions_with_explicit_final_argument_differs_from_initial_only_argument():
+    g2_initial = _base_g2_result(recommended=[])
+    g2_final = _base_g2_result(recommended=[{"action": "ESCALATE_TO_ANALYST", "route": "auto", "reason": "R8: ..."}])
+    actions = co._next_best_actions(g2_initial, g2_final)
+    assert actions["initial"] == []
+    assert actions["final"] == [{"action": "ESCALATE_TO_ANALYST", "route": "auto", "reason": "R8: ..."}]
+    assert actions["what_changed"] == "added ESCALATE_TO_ANALYST once the validated reasoning output (verdict/fraud_probability/pattern/exposure_usd) was available"
+
+
+def test_next_best_actions_describes_removed_actions_too():
+    # Constructed only to prove _describe_action_diff's "removed" branch --
+    # g2_policy.evaluate itself never removes an action between passes (a
+    # RECOMMENDED action's condition stays true once met), this is a
+    # direct unit test of the diff-description helper, not a claim about
+    # real G2 behavior.
+    g2_initial = _base_g2_result(recommended=[{"action": "DECLINE_TRANSACTION", "route": "L1", "reason": "R5"}])
+    g2_final = _base_g2_result(recommended=[])
+    actions = co._next_best_actions(g2_initial, g2_final)
+    assert actions["what_changed"] == "removed DECLINE_TRANSACTION once the validated reasoning output (verdict/fraud_probability/pattern/exposure_usd) was available"

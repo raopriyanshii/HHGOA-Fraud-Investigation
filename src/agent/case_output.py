@@ -9,11 +9,16 @@ one place these three sources are combined: G1, G2, and the reasoning
 layer never see each other's output shape.
 
 Scope (deliberately limited this phase): produces `case` (Part 1) and
-`next_best_actions` (Part 3, `initial` == `final` -- no evidence-request
-loop exists yet, matching the organizer's own rule "If you requested
-nothing, final equals initial"). Does NOT produce `sar`, `evidence_
-requests`, `stop_reason` (beyond the failure-path one below), `tool_
-calls`, `tokens`, `latency_s`, `connected_card_ids`,
+`next_best_actions` (Part 3). `next_best_actions.initial` still equals
+`next_best_actions.final` whenever the post-reasoning G2 pass (G11-D)
+recommends the exact same actions as the pre-reasoning pass -- no
+evidence-request loop exists yet, matching the organizer's own rule "If
+you requested nothing, final equals initial" -- but they now genuinely
+CAN differ, when the validated verdict/fraud_probability/pattern/
+exposure_usd unlock a rule (R8, §3a, R9, or R5's BLOCK_CARD route) that
+the pre-reasoning ledger alone could not satisfy. Does NOT produce `sar`,
+`evidence_requests`, `stop_reason` (beyond the failure-path one below),
+`tool_calls`, `tokens`, `latency_s`, `connected_card_ids`,
 `connected_device_profiles`, `written_to_graph`, or `graph_case_id` --
 these remain later-phase work, not invented here.
 """
@@ -21,6 +26,7 @@ from __future__ import annotations
 
 from src.agent.reasoning import DEFAULT_LLM_TIMEOUT_S, CallLLM, build_evidence_package, get_llm_reasoning
 from src.agent.reasoning_validator import validate_reasoning_output
+from src.policy import g2_policy
 
 
 def _status_for(verdict: str, g1_recommendation: str | None) -> str:
@@ -50,20 +56,58 @@ def _similar_prior_cases(ledger: dict) -> list[str]:
     return case_ids
 
 
-def _next_best_actions(g2_result: dict) -> dict:
-    """Entirely deterministic, entirely from G2's own `recommended`
-    bucket. G2's `prohibited`/`deferred` buckets are never read here --
-    that is what structurally guarantees a PROHIBITED action (e.g.
-    BLOCK_ALL_CARDS) can never appear as a recommended next-best-action:
-    there is no code path from `prohibited` to this output at all, let
-    alone one that passes through the LLM. The LLM's output is not
-    consulted for this field at all in this phase.
-    """
-    actions = [
+def _actions_from_g2_result(g2_result: dict) -> list[dict]:
+    return [
         {"action": e["action"], "route": e.get("route"), "reason": e["reason"]}
         for e in g2_result.get("recommended", [])
     ]
-    return {"initial": actions, "final": actions, "what_changed": "nothing"}
+
+
+def _describe_action_diff(initial: list[dict], final: list[dict]) -> str:
+    """Deterministic, from the actual action-set difference only -- never
+    a generic/hardcoded claim. `initial`/`final` are both already in
+    CANONICAL_ACTION_ORDER (g2_policy.evaluate builds `recommended` by
+    iterating that fixed tuple), so iterating each list in order and
+    comparing against the other's action-name set preserves that order
+    with no additional sort needed.
+    """
+    initial_actions = {a["action"] for a in initial}
+    final_actions = {a["action"] for a in final}
+    added = [a["action"] for a in final if a["action"] not in initial_actions]
+    removed = [a["action"] for a in initial if a["action"] not in final_actions]
+    if not added and not removed:
+        return "nothing"
+    parts = []
+    if added:
+        parts.append(f"added {', '.join(added)}")
+    if removed:
+        parts.append(f"removed {', '.join(removed)}")
+    return "; ".join(parts) + " once the validated reasoning output (verdict/fraud_probability/pattern/exposure_usd) was available"
+
+
+def _next_best_actions(g2_result: dict, g2_result_final: dict | None = None) -> dict:
+    """Entirely deterministic, entirely from G2's own `recommended`
+    bucket -- G2's `prohibited`/`deferred` buckets are never read here,
+    which is what structurally guarantees a PROHIBITED action (e.g.
+    BLOCK_ALL_CARDS) can never appear as a recommended next-best-action:
+    there is no code path from `prohibited` to this output at all. The
+    LLM's raw output is never consulted here directly -- only through
+    already-validated, already-grounded fields (verdict/fraud_probability/
+    pattern/exposure_usd) that g2_policy.evaluate treats as plain,
+    deterministic comparisons, exactly like every other rule it applies.
+
+    `g2_result` is always the pre-reasoning ("initial") G2 pass.
+    `g2_result_final`, when given, is the post-reasoning ("final") pass
+    (g2_policy.evaluate(ledger, validated)) -- see investigate_and_
+    assemble below. When omitted, `final` equals `initial` exactly as
+    before this phase (used only by callers/tests that never run a
+    second G2 pass).
+    """
+    initial = _actions_from_g2_result(g2_result)
+    if g2_result_final is None:
+        return {"initial": initial, "final": initial, "what_changed": "nothing"}
+    final = _actions_from_g2_result(g2_result_final)
+    return {"initial": initial, "final": final, "what_changed": _describe_action_diff(initial, final)}
 
 
 def _evidence_list(ledger: dict, g2_result: dict) -> list[dict]:
@@ -180,10 +224,19 @@ async def investigate_and_assemble(
             ),
         }
 
+    # G11-D: the post-reasoning ("final") G2 pass -- called ONLY here,
+    # after both the LLM call and validation have succeeded, using the
+    # SAME g2_policy.evaluate() the pre-reasoning g2_result above already
+    # came from, now additionally given the validated reasoning output.
+    # On any failure path above, this line is never reached -- there is
+    # no other call to g2_policy.evaluate with a second argument anywhere
+    # in this module.
+    g2_result_final = g2_policy.evaluate(ledger, validated)
+
     return {
         "ok": True,
         "case": assemble_case(ledger, g2_result, validated),
-        "next_best_actions": _next_best_actions(g2_result),
+        "next_best_actions": _next_best_actions(g2_result, g2_result_final),
         "stripped_ids": validated.get("stripped_ids", []),
         "stop_reason": _stop_reason_for_success(ledger, validated),
     }

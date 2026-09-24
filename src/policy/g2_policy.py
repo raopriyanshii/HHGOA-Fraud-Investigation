@@ -2,13 +2,29 @@
 Phase G2 -- policy & next-best-action layer, implementing the approved
 Revision 2 specification exactly. Pure function over a G1 ledger
 (src.agent.workflow.investigate()'s return value): no TigerGraph, no
-MCP, no LLM, no risk_score, no invented fraud_probability/exposure_usd/
-pattern/customer-response. Every action is traced to a literal condition
+MCP, no LLM, no risk_score. Every action is traced to a literal condition
 from the organizer's official Fraud Policy (D:\\hackathon\\task_5\\README.md)
 or classified DEFERRED with the exact missing input named.
 
 This module does not import or call src.agent.workflow -- it only
 consumes that function's return value, passed in by the caller.
+
+G11-D: `evaluate()` takes an optional second argument, `validated` --
+the already-validated reasoning output (reasoning_validator.py's
+accepted {"ok": True, "verdict", "fraud_probability", "pattern",
+"exposure_usd", "affected_txn_ids", ...} dict). When omitted (the
+default, `None`), every rule below behaves EXACTLY as it always has --
+this preserves the pre-reasoning ("initial") G2 pass byte-for-byte, used
+by src.agent.case_output.investigate_and_assemble to build the LLM's
+evidence package before any reasoning output exists. When `validated` is
+supplied (the "final", post-reasoning pass, called only after
+validation succeeds), a small, explicitly-listed set of rules that the
+organizer's policy ties to verdict/fraud_probability/pattern/exposure_usd
+gain an additional, deterministic check -- see _evaluate_create_case,
+_evaluate_file_report, _evaluate_escalate_to_analyst, _evaluate_block_card.
+No rule here ever reads raw LLM text or makes a judgment call itself:
+every check is a plain comparison against already-validated, already-
+grounded numbers/enums, exactly like every other rule in this module.
 """
 from __future__ import annotations
 
@@ -40,10 +56,15 @@ PROHIBITED = "PROHIBITED"
 ELIGIBLE_NOT_RECOMMENDED = "ELIGIBLE_NOT_RECOMMENDED"
 DEFERRED = "DEFERRED"
 
-# Every one of the 12 actions with no literal, satisfiable condition in
-# this version -- each reason names the specific missing input, per the
-# approved spec's decision-rule table. Not a fallback/default: these are
-# the documented, final determination for V1, not a placeholder.
+# Every one of these actions has no literal, satisfiable condition given
+# ONLY the G1 ledger -- each reason names the specific missing input, per
+# the approved spec's decision-rule table. This is the exact fallback
+# text used for the pre-reasoning pass (validated=None) for every action
+# below, and remains the FINAL determination even post-reasoning for the
+# actions whose missing input is still not one of verdict/
+# fraud_probability/pattern/exposure_usd/affected_txn_ids (a customer
+# response, a no-reply state, or a recurring-pattern match -- none of
+# which this project has ever gathered).
 _DEFERRED_REASONS = {
     "ALLOW_TRANSACTION": "no policy rule cites a positive trigger condition for this action",
     "MONITOR_CARD": "R4 requires a no-reply state, not tracked by G1/G2",
@@ -63,11 +84,14 @@ _DEFERRED_REASONS = {
 # STEP_UP_AUTH are not in this table -- they have dedicated evaluators
 # below (the same pattern CREATE_CASE and BLOCK_ALL_CARDS already use),
 # since R6/R5 make them conditionally RECOMMENDED rather than
-# unconditionally DEFERRED. BLOCK_CARD stays here: its trigger is
-# partially checkable via R5 now, but its route can never be determined
-# without exposure_usd, so it is unconditionally DEFERRED regardless of
-# ledger content -- a static reason is accurate, a dedicated evaluator
-# would not change the outcome and is not added.
+# unconditionally DEFERRED.
+#
+# G11-D: BLOCK_CARD and ESCALATE_TO_ANALYST also moved to dedicated
+# evaluators below (_evaluate_block_card, _evaluate_escalate_to_analyst)
+# -- their entries in this dict remain as the exact fallback text used
+# whenever `validated` is None (preserving the pre-reasoning pass
+# byte-for-byte) or when validated is present but their specific
+# condition still doesn't hold.
 
 
 def _r6_evidence_present(ledger: dict) -> bool:
@@ -121,6 +145,43 @@ def _r6_evidence_present(ledger: dict) -> bool:
     return False
 
 
+def _r9_cross_customer_evidence_present(ledger: dict) -> bool:
+    """R9's "coordinated or repeated abuse across customers" clause is
+    strictly narrower than R6's own evidence: R6 fires on "several cards"
+    sharing an element (which src.investigation.queries.py's Q9 result
+    never requires to belong to different customers -- see
+    _extract_cross_card_results's `same_customer` field), but R9 names
+    "across customers" explicitly. Reuses the EXACT same Q9
+    cross_card_fraud_verification data _r6_evidence_present reads --
+    gathers no new evidence, adds no new tool call -- and additionally
+    requires at least one has_confirmed_fraud entry with
+    same_customer == False (a field Q9 already computes and _r6_
+    evidence_present already ignores). Mirrors _r6_evidence_present's
+    exact full_evidence/tool_calls dual-path structure for consistency.
+    """
+    full_evidence = ledger.get("full_evidence")
+    if full_evidence is not None:
+        cross_card = full_evidence.get("cross_card_fraud_verification") or {}
+        for path in ("via_device", "via_region"):
+            path_result = cross_card.get(path)
+            if path_result:
+                for entry in path_result.get("other_cards", []):
+                    if isinstance(entry, dict) and entry.get("has_confirmed_fraud") and entry.get("same_customer") is False:
+                        return True
+        return False
+
+    for tc in ledger.get("tool_calls", []):
+        if tc.get("tool") == "cross_card_fraud_verification" and tc.get("success"):
+            result = tc.get("curated_result_summary") or {}
+            for path in ("via_device", "via_region"):
+                path_result = result.get(path)
+                if path_result:
+                    for entry in path_result.get("other_cards", []):
+                        if isinstance(entry, dict) and entry.get("has_confirmed_fraud") and entry.get("same_customer") is False:
+                            return True
+    return False
+
+
 def _r5_evidence_present(ledger: dict) -> bool:
     """R5 (organizer Fraud Policy): "Three or more small online
     authorizations on one card within an hour, followed by a larger
@@ -153,7 +214,7 @@ def _get_trigger_type(ledger: dict) -> tuple[str | None, str]:
     return None, "missing"
 
 
-def _evaluate_create_case(ledger: dict) -> tuple[str, str | None, str]:
+def _evaluate_create_case(ledger: dict, validated: dict | None = None) -> tuple[str, str | None, str]:
     trigger_type, status = _get_trigger_type(ledger)
 
     # Existing §3a customer-dispute path -- condition and reason text
@@ -165,6 +226,16 @@ def _evaluate_create_case(ledger: dict) -> tuple[str, str | None, str]:
     # customer_report check above, which is always evaluated first.
     if _r6_evidence_present(ledger):
         return RECOMMENDED, "auto", "R6: shared non-hub device/region evidence shows independently confirmed fraud on another card"
+
+    # G11-D: §3a's own third, explicit trigger ("Open one whenever fraud
+    # probability reaches 0.30") -- only checkable post-reasoning, since
+    # fraud_probability does not exist in the G1 ledger. validated=None
+    # (the pre-reasoning pass) always skips this, unchanged from before.
+    if validated is not None and validated.get("fraud_probability") is not None and validated["fraud_probability"] >= 0.30:
+        return (
+            RECOMMENDED, "auto",
+            f"§3a: fraud probability {validated['fraud_probability']} reaches the 0.30 case-opening threshold",
+        )
 
     if status == "known":
         return (
@@ -196,9 +267,28 @@ def _evaluate_monitor_connected_cards(ledger: dict) -> tuple[str, str | None, st
     )
 
 
-def _evaluate_file_report(ledger: dict) -> tuple[str, str | None, str]:
+def _evaluate_file_report(ledger: dict, validated: dict | None = None) -> tuple[str, str | None, str]:
+    # G11-D: R9's own path is checked FIRST, and only when `validated` is
+    # present -- "activity fits none of the known patterns but the
+    # evidence shows coordinated or repeated abuse across customers."
+    # R9's evidence (_r9_cross_customer_evidence_present) is a STRICT
+    # SUBSET of R6's (same has_confirmed_fraud check, plus same_customer
+    # is False), so it is always also valid R6 evidence; checking it
+    # first lets the more specific, more accurate citation win whenever
+    # `pattern` is genuinely "undocumented", without changing the result
+    # for any ledger that doesn't also satisfy this narrower condition
+    # (those still fall through to the unchanged R6 check below).
+    # `pattern` does not exist pre-reasoning, so validated=None always
+    # skips straight to the R6 check, unchanged from before this change.
+    if validated is not None and validated.get("pattern") == "undocumented" and _r9_cross_customer_evidence_present(ledger):
+        return (
+            RECOMMENDED, "L2",
+            "R9: undocumented pattern with confirmed fraud on another customer's card sharing a named element (device/region)",
+        )
+
     if _r6_evidence_present(ledger):
         return RECOMMENDED, "L2", "R6: shared non-hub device/region evidence shows independently confirmed fraud on another card"
+
     return (
         DEFERRED,
         None,
@@ -226,6 +316,58 @@ def _evaluate_step_up_auth(ledger: dict) -> tuple[str, str | None, str]:
     )
 
 
+def _evaluate_escalate_to_analyst(ledger: dict, validated: dict | None = None) -> tuple[str, str | None, str]:
+    """R8: "If the verdict is uncertain and exposure exceeds $500, or the
+    evidence conflicts, recommend ESCALATE_TO_ANALYST." Both clauses are
+    gated behind `validated is not None`, even the "evidence conflicts"
+    alternative (whose `ledger.uncertainties` input technically exists
+    pre-reasoning too) -- so the pre-reasoning pass (validated=None) is
+    unconditionally DEFERRED, byte-for-byte identical to before this
+    change, and ESCALATE_TO_ANALYST is only ever evaluated post-
+    reasoning, per the required architecture.
+    """
+    if validated is not None:
+        verdict = validated.get("verdict")
+        exposure = validated.get("exposure_usd")
+        if verdict == "uncertain" and exposure is not None and exposure > 500:
+            return RECOMMENDED, "auto", f"R8: verdict 'uncertain' with exposure ${exposure} exceeding $500"
+        if ledger.get("uncertainties"):
+            return RECOMMENDED, "auto", "R8: evidence conflicts (ledger uncertainties present)"
+    return DEFERRED, None, _DEFERRED_REASONS["ESCALATE_TO_ANALYST"]
+
+
+def _evaluate_block_card(ledger: dict, validated: dict | None = None) -> tuple[str, str | None, str]:
+    """R5: "If a purchase over $100 has already cleared, recommend
+    BLOCK_CARD." The $100+ cleared-purchase condition is checkable from
+    G1's own pattern_evidence (src.investigation.patterns.
+    classify_card_testing already reports each candidate's
+    larger_purchase_amount -- no new evidence needed), but the route
+    (L1 vs L2, README section 2: L1 when exposure <= $2,500, L2
+    otherwise) can only be set once exposure_usd exists, i.e. post-
+    reasoning. When validated is None, or the R5 condition isn't met,
+    falls through to the exact original DEFERRED text -- unchanged from
+    before this change.
+    """
+    pattern_evidence = ledger.get("pattern_evidence") or {}
+    if pattern_evidence.get("matched"):
+        cleared_amount = next(
+            (
+                c.get("larger_purchase_amount")
+                for c in (pattern_evidence.get("candidates") or [])
+                if isinstance(c, dict) and c.get("larger_purchase_amount") is not None and c["larger_purchase_amount"] > 100
+            ),
+            None,
+        )
+        if cleared_amount is not None and validated is not None and validated.get("exposure_usd") is not None:
+            exposure = validated["exposure_usd"]
+            route = "L1" if exposure <= 2500 else "L2"
+            return (
+                RECOMMENDED, route,
+                f"R5: a ${cleared_amount} purchase has already cleared (over $100); exposure ${exposure} sets the L1/L2 route",
+            )
+    return DEFERRED, None, _DEFERRED_REASONS["BLOCK_CARD"]
+
+
 def _evaluate_block_all_cards(ledger: dict) -> tuple[str, str | None, str]:
     # Unconditional in V1: R10's exception can never be confirmed true from
     # G1's evidence (see module docstring / spec Revision 2), regardless of
@@ -242,15 +384,24 @@ def _evaluate_block_all_cards(ledger: dict) -> tuple[str, str | None, str]:
     )
 
 
-def evaluate(ledger: dict) -> dict:
-    """Pure function: G1 ledger -> G2 policy decision.
+def evaluate(ledger: dict, validated: dict | None = None) -> dict:
+    """Pure function: G1 ledger (+ optional validated reasoning output)
+    -> G2 policy decision.
 
     Every one of the 14 official actions is evaluated exactly once, in
     CANONICAL_ACTION_ORDER, and placed into exactly one of the four
     policy-state buckets -- each bucket list is built by iterating the
     fixed CANONICAL_ACTION_ORDER tuple (never a dict/set), so repeated
-    calls on the same ledger always produce identical output, including
-    list order.
+    calls on the same ledger (and the same validated, or its absence)
+    always produce identical output, including list order.
+
+    G11-D: `validated` defaults to None. `evaluate(ledger)` -- the exact
+    call every existing caller and test already makes -- is completely
+    unaffected: every evaluator below either ignores `validated` or
+    explicitly checks `validated is not None` before using it, so the
+    pre-reasoning ("initial") pass is byte-for-byte identical to before
+    this change. Passing the validated reasoning output produces the
+    post-reasoning ("final") pass, used only after reasoning succeeds.
     """
     recommended: list[dict] = []
     prohibited: list[dict] = []
@@ -259,17 +410,21 @@ def evaluate(ledger: dict) -> dict:
 
     for action in CANONICAL_ACTION_ORDER:
         if action == "CREATE_CASE":
-            state, route, reason = _evaluate_create_case(ledger)
+            state, route, reason = _evaluate_create_case(ledger, validated)
         elif action == "BLOCK_ALL_CARDS":
             state, route, reason = _evaluate_block_all_cards(ledger)
         elif action == "MONITOR_CONNECTED_CARDS":
             state, route, reason = _evaluate_monitor_connected_cards(ledger)
         elif action == "FILE_REPORT":
-            state, route, reason = _evaluate_file_report(ledger)
+            state, route, reason = _evaluate_file_report(ledger, validated)
         elif action == "DECLINE_TRANSACTION":
             state, route, reason = _evaluate_decline_transaction(ledger)
         elif action == "STEP_UP_AUTH":
             state, route, reason = _evaluate_step_up_auth(ledger)
+        elif action == "BLOCK_CARD":
+            state, route, reason = _evaluate_block_card(ledger, validated)
+        elif action == "ESCALATE_TO_ANALYST":
+            state, route, reason = _evaluate_escalate_to_analyst(ledger, validated)
         else:
             state, route, reason = DEFERRED, None, _DEFERRED_REASONS[action]
 
