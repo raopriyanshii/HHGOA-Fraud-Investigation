@@ -8,7 +8,14 @@ from src.graph.tigergraph_connection import scrub_secret
 
 
 DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
-DEFAULT_MAX_OUTPUT_TOKENS = 1024
+# G9 finding: 1024 was too low for this schema in practice -- a real
+# HHG-001 call truncated mid-object (the free-text reasoning/summary
+# fields can run long), producing a JSON parse error despite
+# response_json_schema's usual guarantee of valid JSON. Raised to a more
+# realistic budget for this 9-field schema; still far under the model's
+# documented 65,536-token output ceiling. Not a retry mechanism, not an
+# architecture change -- a single numeric configuration value.
+DEFAULT_MAX_OUTPUT_TOKENS = 4096
 
 
 def make_gemini_call_llm(

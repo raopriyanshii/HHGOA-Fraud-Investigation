@@ -658,3 +658,107 @@ Deliberately out of scope this phase (not invented here): `sar`,
 `connected_device_profiles`, `written_to_graph`, `graph_case_id`, `case_id`
 at the top level, and any `next_best_actions` evolution beyond `initial ==
 final` (no evidence-request/response loop exists yet).
+
+## 14. G8 addition — real LLM providers + prompt-serialization compaction (finalized)
+
+Two provider adapters, `src/agent/llm_providers/gemini_provider.py`
+(`make_gemini_call_llm`, default model `gemini-3.6-flash`) and
+`groq_provider.py` (`make_groq_call_llm`, `openai/gpt-oss-20b`), each
+producing nothing but a `CallLLM` closure — Section 13's isolation
+guarantees are unchanged and independently re-verified for both (zero
+MCP/TigerGraph imports, confirmed by AST inspection tests; no retries; no
+timeout of their own, relying entirely on Section 13's existing 60s
+`asyncio.wait_for`).
+
+**A real defect was found and fixed via live HHG-011 data**, before any
+LLM call was involved: `g2_policy._r6_evidence_present` read
+`tool_calls[].curated_result_summary`, which `_trim()` collapses past 5
+entries — for a real, highly-connected card (795 device-linked cards),
+`other_cards` becomes `{"count": 795, "sample": [...]}`, and iterating a
+dict yields its *keys* as bare strings, crashing on `entry.get(...)`. Fixed
+by reading `full_evidence` (untrimmed) when present, falling back to the
+old path for pre-G7 ledgers, with an `isinstance` guard against a repeat.
+
+**Prompt-serialization-only compaction** (the actual fix for a second real
+finding — a genuine HHG-011 prompt reached 441,741 characters and was
+rejected outright by a provider): `evidence_package["facts"]` and
+`["known_ids"]` (built by `_collect_known_ids`/`_compact_cross_card_evidence`)
+remain **complete** — every confirmed-fraud connected card, in full, no
+first-N sampling, plus all six known-id categories (txn/card/customer/
+device/case/region). `build_prompt()` alone renders a narrower view:
+`_compact_cross_card_for_prompt` re-shapes confirmed-fraud records into
+`[card_key, same_customer, confirmed_fraud_case_ids]` arrays (customer_id
+dropped from the *rendered text only* — always derivable from `card_key`
+by this project's own `card_key == f"{customer_id}:{card1}"` convention,
+and never an output field), and the KNOWN IDS block renders only `txn`
+(`REASONING_OUTPUT_SCHEMA` has no card/customer/device/case/region output
+field). Net result on real HHG-011 data: 441,741 → 140,570 characters
+(68.2% reduction), 58,038 exact tokens against `gemini-3.6-flash`'s
+1,048,576-token window (measured via Gemini's own `count_tokens`, not
+estimated).
+
+`scrub_secret()` (`src/graph/tigergraph_connection.py`) was widened to
+cover `GROQ_API_KEY`/`GEMINI_API_KEY` fragment-matching, the same
+mechanism already used for `TG_GSQL_SECRET` — confirmed empirically that
+neither key format would have been caught by the pre-existing JWT/Bearer/
+named-field rules.
+
+## 15. G9 addition — end-to-end benchmark runner (finalized)
+
+`src/benchmark/g9_runner.py` adds **no new investigation, reasoning,
+validation, or policy logic** — it only iterates `workflow.investigate()`
+→ `g2_policy.evaluate()` → `case_output.investigate_and_assemble()`
+(unmodified) across the 20 `case_pack_resolved.csv` rows, each as a
+`{"type": "case_id", "value": ...}` trigger (the same trigger form used
+throughout this project's real-data testing). Never calls TigerGraph
+directly and never bypasses MCP: the only path to graph data remains
+`workflow.investigate()`'s own `call_tool`, defaulting to the real MCP
+dispatch exactly as G1 already established.
+
+**Call budget**: exactly one LLM call per case, unchanged from Section
+13/14 — the runner's only addition is a non-invasive recording wrapper
+around the injected `call_llm` (captures the raw response/error for the
+audit artifact, forwards to the real call unchanged, adds no call, no
+retry, no timeout of its own).
+
+**Per-case isolation**: a case whose `workflow.investigate()` call itself
+raises (e.g. a transient TigerGraph error) is caught at the loop level,
+recorded as `{"success": false, "stage": "runner_exception", "error":
+scrub_secret(...)}`, and the run continues — one case's failure never
+stops the remaining 19.
+
+**Command**:
+```bash
+python -m src.benchmark.g9_runner --provider gemini
+python -m src.benchmark.g9_runner --provider gemini --case HHG-001   # single case
+python -m src.benchmark.g9_runner --provider groq --output-dir outputs_groq
+```
+
+**Output** (gitignored — see `.gitignore`, same reasoning as
+`data/processed/`): `outputs/case_results/<CASE_ID>.json` per case
+(`case_id`, `investigation_id`, `trigger`, `flagged_transaction`, `g1`
+[recommendation/basis/tool_calls/uncertainties/pattern_evidence],
+`g2_policy` [full `evaluate()` output], `llm` [raw_response/call_error],
+`outcome` [the real `case_output.investigate_and_assemble()` return —
+`case`/`next_best_actions`/`stripped_ids`/`stop_reason` on success, or
+`failure_reason`/`detail`/`stop_reason` on failure], `success`,
+`timing_s`), plus one `outputs/evaluation_summary.json` (total/successful/
+failed case counts, LLM successes/failures, validator failures, pipeline
+exceptions, per-case policy results, per-case and total execution time,
+and a `failure_reasons` tally). **No accuracy or correctness score is
+computed or invented** — no organizer answer key exists in this
+repository to compare against.
+
+**Live run result (this phase, real data, honestly recorded — not all 20
+succeeded)**: 20/20 cases attempted, 1 succeeded end-to-end (HHG-003 —
+real verdict `uncertain`, `fraud_probability` 0.45, grounded
+`affected_txn_ids`, deterministic `exposure_usd`), 19 failed at the LLM
+call stage: 13 with `503 UNAVAILABLE` (Gemini `gemini-3.6-flash`
+reporting genuine, current high-demand overload) and 6 with `429
+RESOURCE_EXHAUSTED` (this account's request quota, exhausted by this
+session's cumulative real testing volume). Zero fabricated results; every
+failure recorded exactly as returned; zero retries attempted anywhere in
+this run. `DEFAULT_MAX_OUTPUT_TOKENS` was raised from 1024 to 4096 during
+this phase after a real HHG-001 attempt produced a JSON-schema-violating
+truncated response at the old value — a disclosed configuration change,
+not an architecture change.

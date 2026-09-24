@@ -212,6 +212,19 @@ def test_defaults_match_the_intended_model_and_are_explicit_constants():
     assert gp.DEFAULT_MAX_OUTPUT_TOKENS > 0
 
 
+def test_default_max_output_tokens_is_high_enough_to_avoid_the_real_g9_truncation_bug():
+    # G9 finding: a real HHG-001 call with the old default (1024) produced
+    # a JSON parse error ("Expecting property name enclosed in double
+    # quotes") -- the schema-conformant response (which includes free-text
+    # reasoning/summary fields) was truncated mid-object before the model
+    # could close it, despite response_json_schema's usual guarantee of
+    # valid JSON. Raised to 4096. This pins the specific value so a future
+    # change can't silently regress back toward the value that broke a
+    # real case, without at least being a deliberate, visible edit here.
+    assert gp.DEFAULT_MAX_OUTPUT_TOKENS == 4096
+    assert gp.DEFAULT_MAX_OUTPUT_TOKENS > 1024  # strictly above the value that actually truncated
+
+
 def test_request_uses_the_shared_reasoning_output_schema_and_json_mime_type(monkeypatch):
     fake_cls = _make_fake_client_class(response_text=json.dumps(_VALID_RESPONSE_BODY))
     call_llm = _call_llm_with_fake_client(fake_cls, monkeypatch)
