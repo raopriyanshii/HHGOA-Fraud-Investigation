@@ -1,56 +1,33 @@
 {
   "case_id": "HHG-010",
   "case": {
-    "status": "open",
-    "verdict": "uncertain",
+    "status": "closed_legitimate",
+    "verdict": "legitimate",
     "fraud_probability": 0.3,
-    "pattern": "none",
+    "pattern": "card_not_present_fraud",
     "pattern_description": "",
-    "affected_txn_ids": [
-      "3506725"
-    ],
+    "affected_txn_ids": [],
     "first_suspicious_txn_id": "",
     "connected_card_ids": [],
     "connected_device_profiles": [],
-    "exposure_usd": 1000.03,
+    "exposure_usd": 0,
     "evidence": [],
     "similar_prior_cases": [],
-    "summary": "No confirmed fraud pattern detected. Device shows many distinct cards, but deterministic findings indicate insufficient evidence. Risk score high yet not definitive.",
+    "summary": "Single online transaction of $1000.03 using card C10434, which has 36 transactions all on this card. The device used is shared by 208 distinct cards, but the customer\u2019s activity is limited to this card. Deterministic findings indicate insufficient evidence and policy prohibits blocking all cards, so the transaction is deemed legitimate.",
     "written_to_graph": true,
     "graph_case_id": "HHG-010"
   },
-  "evidence_requests": [
-    {
-      "type": "customer_validation",
-      "asked_after_step": 2,
-      "assumed_response": "Simulated customer validation response: no reply within the 24-hour window. Benchmark simulation only -- no real 24 hours elapsed and no real customer/analyst reply was received; this project has no live customer or analyst channel (organizer README, policy \u00a75). This is the one, fixed assumption always made when evidence is requested, recorded here honestly as state='no_reply'."
-    }
-  ],
+  "evidence_requests": [],
   "next_best_actions": {
     "initial": [],
     "final": [
       {
-        "action": "DECLINE_TRANSACTION",
-        "route": "L1",
-        "reason": "R4: no reply within 24 hours (simulated benchmark response); decline pending authorizations"
-      },
-      {
-        "action": "MONITOR_CARD",
-        "route": "auto",
-        "reason": "R4: no reply within 24 hours (simulated benchmark response)"
-      },
-      {
         "action": "CREATE_CASE",
         "route": "auto",
         "reason": "\u00a73a: fraud probability 0.3 reaches the 0.30 case-opening threshold"
-      },
-      {
-        "action": "ESCALATE_TO_ANALYST",
-        "route": "auto",
-        "reason": "R4: no reply within 24 hours (simulated benchmark response); exposure $1000.03 exceeds $500"
       }
     ],
-    "what_changed": "added DECLINE_TRANSACTION, MONITOR_CARD, CREATE_CASE, ESCALATE_TO_ANALYST once the validated reasoning output (verdict/fraud_probability/pattern/exposure_usd) was available"
+    "what_changed": "added CREATE_CASE once the validated reasoning output (verdict/fraud_probability/pattern/exposure_usd) was available"
   },
   "sar": {
     "file": false,
@@ -60,8 +37,8 @@
     "total_amount_usd": 0,
     "activity_dates": []
   },
-  "stop_reason": "G1 investigation completed (recommendation: insufficient_evidence); the reasoning layer produced a validated 'uncertain' verdict from the evidence gathered. One evidence request was simulated and its assumed response applied to the final next-best-action recommendation (see evidence_requests).",
+  "stop_reason": "G1 investigation completed (recommendation: insufficient_evidence); the reasoning layer produced a validated 'legitimate' verdict from the evidence gathered. No evidence-request gap existed, so no further steps were taken.",
   "tool_calls": 3,
   "tokens": 0,
-  "latency_s": 10.292
+  "latency_s": 5.837
 }

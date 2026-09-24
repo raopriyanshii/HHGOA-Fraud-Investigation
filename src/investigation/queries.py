@@ -474,3 +474,57 @@ def q9_cross_card_fraud_verification(conn, card_key: str) -> dict:
         "via_device": _run_cross_card_path(conn, _Q9_VIA_DEVICE_GSQL, card_key),
         "via_region": _run_cross_card_path(conn, _Q9_VIA_REGION_GSQL, card_key),
     }
+
+
+# ---------------------------------------------------------------------------
+# Q10 -- Prior investigation memory (read-only; not wired into workflow.py)
+#
+# This system's own previously written HHG_InvestigationCase records for
+# the same card -- distinct from Q4's HHG_ClosedCase history (the
+# organizer's pre-loaded data) and never merged with it or with
+# similar_prior_cases. Traversal: Card -(HHG_ON_CARD_reverse)->
+# HHG_InvestigationCase -- the SAME edge type Q4 already uses for
+# HHG_ClosedCase, one hop, populated for every case at seed load time
+# (gsql/04_loading_jobs.gsql's load_case_pack_seed), independent of
+# whether G10 has ever run for it. Never HHG_INVOLVES/HHG_CITES: neither
+# edge type has Card as a valid FROM/TO endpoint (INVOLVES connects to
+# HHG_Transaction, CITES connects to HHG_ClosedCase) -- confirmed against
+# the actual schema (gsql/02_edges.gsql), not assumed from either name.
+#
+# written_to_graph == TRUE excludes seed-default rows (verdict="",
+# fraud_probability=-1, etc.) that were never actually investigated --
+# without this filter every other one of the 20 seed cases would look
+# like a real prior conclusion. case_id != input_case_id excludes the
+# case currently being investigated from citing its own prior state (a
+# real self-reference risk on any re-run, mirroring Q5's own
+# `WHERE c != input_card` self-exclusion pattern).
+# ---------------------------------------------------------------------------
+
+_Q10_GSQL = """
+INTERPRET QUERY (VERTEX<HHG_Card> input_card, STRING input_case_id) FOR GRAPH HHGOA_FraudInvestigation {
+  Start = {input_card};
+  PriorCases = SELECT cc FROM Start:s -(HHG_ON_CARD_reverse:e)-> HHG_InvestigationCase:cc
+               WHERE cc.case_id != input_case_id AND cc.written_to_graph == TRUE;
+  PRINT PriorCases;
+}
+"""
+
+PRIOR_INVESTIGATION_FIELDS = (
+    "case_id", "verdict", "fraud_probability", "pattern", "exposure_usd", "summary", "updated_at", "written_to_graph",
+)
+
+
+def q10_prior_investigation_memory(conn, card_key: str, case_id: str) -> list[dict]:
+    """Returns every OTHER already-written HHG_InvestigationCase for this
+    card (never the case currently being investigated, never an
+    unwritten seed row). Deliberately excludes evidence_json/
+    next_best_actions_json/sar_json/evidence_requests_json/risk_score/
+    trigger_type/trigger_text -- this project's own internal write
+    format, not a defined contract for a second consumer -- and never
+    touches HHG_ClosedCase; callers must not merge this result into
+    similar_prior_cases (a distinct, organizer-defined field over
+    HHG_ClosedCase only).
+    """
+    result = _run(conn, _Q10_GSQL, {"input_card": card_key, "input_case_id": case_id})
+    prior_cases = _vset(result, "PriorCases")
+    return [_pick(c["attributes"], PRIOR_INVESTIGATION_FIELDS) for c in prior_cases]

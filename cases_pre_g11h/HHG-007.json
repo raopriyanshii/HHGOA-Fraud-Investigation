@@ -1,0 +1,65 @@
+{
+  "case_id": "HHG-007",
+  "case": {
+    "status": "closed_fraud",
+    "verdict": "fraud",
+    "fraud_probability": 0.97,
+    "pattern": "none",
+    "pattern_description": "",
+    "affected_txn_ids": [
+      "3514948"
+    ],
+    "first_suspicious_txn_id": "",
+    "connected_card_ids": [],
+    "connected_device_profiles": [],
+    "exposure_usd": 111.92,
+    "evidence": [],
+    "similar_prior_cases": [
+      "CC-1228",
+      "CC-4196",
+      "CC-3136",
+      "CC-2834",
+      "CC-0765",
+      "CC-4787",
+      "CC-4455",
+      "CC-5521",
+      "CC-5092",
+      "CC-2565",
+      "CC-0104",
+      "CC-1524",
+      "CC-3821",
+      "CC-3439",
+      "CC-2986",
+      "CC-4597",
+      "CC-4277",
+      "CC-1682"
+    ],
+    "summary": "The flagged transaction 3514948 is confirmed fraud per deterministic findings and the customer has a history of confirmed fraud cases.",
+    "written_to_graph": true,
+    "graph_case_id": "HHG-007"
+  },
+  "evidence_requests": [],
+  "next_best_actions": {
+    "initial": [],
+    "final": [
+      {
+        "action": "CREATE_CASE",
+        "route": "auto",
+        "reason": "\u00a73a: fraud probability 0.97 reaches the 0.30 case-opening threshold"
+      }
+    ],
+    "what_changed": "added CREATE_CASE once the validated reasoning output (verdict/fraud_probability/pattern/exposure_usd) was available"
+  },
+  "sar": {
+    "file": false,
+    "reason": "",
+    "narrative": "",
+    "subjects": [],
+    "total_amount_usd": 0,
+    "activity_dates": []
+  },
+  "stop_reason": "G1 investigation completed (recommendation: escalate); the reasoning layer produced a validated 'fraud' verdict from the evidence gathered. No evidence-request loop exists in this phase, so no further steps were taken.",
+  "tool_calls": 3,
+  "tokens": 0,
+  "latency_s": 4.31
+}

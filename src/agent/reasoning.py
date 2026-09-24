@@ -56,6 +56,36 @@ REQUIRED_OUTPUT_KEYS = (
     "uncertainties",
 )
 
+# G14 -- iterative-evidence round 2 (case_output.py orchestrates the
+# actual second call; this module only defines the schema/prompt). The
+# ONLY evidence type accepted in this first implementation. A future
+# type would be added here and to case_output.py's registry together --
+# never inferred from the LLM's own free-form choice.
+VALID_EVIDENCE_REQUEST_TYPES = ("historical_case_evidence",)
+
+# These two are deliberately NOT part of REQUIRED_OUTPUT_KEYS (which
+# reasoning_validator.py's "missing keys" check still uses unchanged) --
+# every existing raw-LLM-response test fixture in this project predates
+# this feature and doesn't set them; reasoning_validator.py treats their
+# absence as needs_more_evidence=False, never a malformed-output
+# rejection. They ARE included in REASONING_OUTPUT_SCHEMA's own
+# "required" list below, because Groq/OpenAI-style strict structured
+# output requires every declared property to be listed there (nullability
+# is expressed via anyOf, exactly like first_suspicious_txn_id already
+# does) -- a real, live provider requirement, not a project preference.
+_SCHEMA_REQUIRED_KEYS = REQUIRED_OUTPUT_KEYS + ("needs_more_evidence", "evidence_request")
+
+# Bounds how many connected_via_device card_keys are ever rendered into
+# the prompt as candidates the LLM may request more evidence about. A
+# real, highly-connected card (HHG-011: 795) would otherwise reintroduce
+# the exact prompt-bloat problem _compact_cross_card_evidence's own
+# docstring documents -- this is a bare card_key list (not full records),
+# but still bounded on the same principle. Validation in case_output.py
+# checks the FULL connected_via_device list, never just this sample --
+# a real card the LLM names correctly is never rejected merely for
+# falling outside this rendering cap.
+_MAX_EVIDENCE_REQUEST_CANDIDATES = 20
+
 
 # Canonical structured-output schema used by providers such as Gemini.
 REASONING_OUTPUT_SCHEMA: dict = {
@@ -106,8 +136,35 @@ REASONING_OUTPUT_SCHEMA: dict = {
                 "type": "string",
             },
         },
+        "needs_more_evidence": {
+            "type": "boolean",
+        },
+        "evidence_request": {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": list(VALID_EVIDENCE_REQUEST_TYPES),
+                        },
+                        "target_card_key": {
+                            "type": "string",
+                        },
+                        "reason": {
+                            "type": "string",
+                        },
+                    },
+                    "required": ["type", "target_card_key", "reason"],
+                    "additionalProperties": False,
+                },
+                {
+                    "type": "null",
+                },
+            ],
+        },
     },
-    "required": list(REQUIRED_OUTPUT_KEYS),
+    "required": list(_SCHEMA_REQUIRED_KEYS),
     "additionalProperties": False,
 }
 
@@ -318,10 +375,32 @@ def build_evidence_package(
     billing_region = combined.get("billing_region")
     connected_cards = combined.get("connected_cards") or {}
 
+    # G14: bounded, deterministic candidate list for the ONE currently
+    # supported evidence-request type (historical_case_evidence via a
+    # named connected_via_device card) -- bare card_key strings only, see
+    # _MAX_EVIDENCE_REQUEST_CANDIDATES's own docstring for why this is
+    # capped instead of exposing the full (potentially 795+) raw list.
+    evidence_request_candidates = sorted({
+        c["card_key"]
+        for c in (connected_cards.get("connected_via_device") or [])
+        if isinstance(c, dict) and c.get("card_key")
+    })[:_MAX_EVIDENCE_REQUEST_CANDIDATES]
+
+    # G14 round 2 only: case_output.py attaches this key to a COPY of the
+    # ledger it passes into this same function for the second reasoning
+    # call -- absent (None) for round 1 and for every existing caller,
+    # so this is fully additive and changes nothing about round 1's own
+    # evidence_package shape.
+    additional_evidence = full_evidence.get("additional_evidence")
+
     return {
         "flagged_txn_id": flagged_txn_id,
 
         "known_ids": _collect_known_ids(ledger),
+
+        "evidence_request_candidates": evidence_request_candidates,
+
+        "additional_evidence": additional_evidence,
 
         "facts": {
             "transaction": combined.get("transaction"),
@@ -500,6 +579,44 @@ def build_prompt(evidence_package: dict) -> str:
         for line in evidence_package["unknown"]
     )
 
+    candidates = evidence_package.get("evidence_request_candidates") or []
+    candidates_json = json.dumps(candidates, indent=2, sort_keys=False)
+
+    additional_evidence = evidence_package.get("additional_evidence")
+
+    if additional_evidence:
+        # G14 round 2: the requested evidence is already included below --
+        # this is the final reasoning pass, needs_more_evidence/
+        # evidence_request are ignored by the caller from here on
+        # regardless of what is returned, so the LLM is told plainly not
+        # to expect a third round.
+        additional_evidence_json = json.dumps(additional_evidence, indent=2, default=str, sort_keys=True)
+        additional_evidence_section = f"""
+
+ADDITIONAL EVIDENCE (retrieved because you requested it in the previous round):
+{additional_evidence_json}
+
+This is your second and final reasoning pass. The evidence above answers your \
+previous request. Set needs_more_evidence to false -- no further evidence request \
+will be honored."""
+        evidence_request_instruction = (
+            "- needs_more_evidence: false -- you already received the one additional "
+            "evidence request this investigation allows\n"
+            "- evidence_request: null"
+        )
+    else:
+        additional_evidence_section = ""
+        evidence_request_instruction = f"""- needs_more_evidence: true only when the evidence above is genuinely \
+insufficient to reach a confident verdict -- most cases do not need this; false otherwise
+- evidence_request: null when needs_more_evidence is false. When true, an object with:
+  - type: must be exactly "historical_case_evidence" -- the only evidence type available \
+right now
+  - target_card_key: chosen ONLY from EVIDENCE YOU MAY REQUEST below -- never invent a \
+card key not listed there
+  - reason: why this specific card's history is needed to reach a verdict
+You may request evidence about at most ONE card, and only once -- there is no second \
+opportunity to ask."""
+
     return f"""You are the reasoning layer of a bank fraud-investigation agent. All \
 graph analysis has already been performed deterministically by a separate query \
 layer and a separate rule-based policy layer. You never query the graph yourself, \
@@ -514,6 +631,10 @@ DETERMINISTIC FINDINGS:
 Results already established by code before you were called. Treat these as fixed, \
 never as one opinion among several to weigh against your own:
 {findings_json}
+
+EVIDENCE YOU MAY REQUEST (connected_via_device card keys -- see needs_more_evidence \
+below; possibly a partial list if there are many more than shown):
+{candidates_json}{additional_evidence_section}
 
 REASONING (what you are allowed to infer from the above):
 - verdict: "fraud", "legitimate", or "uncertain" -- your honest conclusion, never risk_score
@@ -533,6 +654,7 @@ you must NOT answer "card_testing" either
 - reasoning: your reasoning in your own words, explicitly naming any point where the evidence \
 does not clearly support one conclusion
 - uncertainties: a list of short strings naming anything you could not resolve from the evidence
+{evidence_request_instruction}
 
 UNKNOWN (not available to you -- never convert these into a fabricated fact):
 {unknown_lines}
@@ -544,6 +666,8 @@ at or silently corrected):
 
 You MUST NOT:
 - call TigerGraph or any tool directly
+- choose an MCP tool name yourself or generate any query -- you may only name a \
+registered evidence type and a card key from the list already shown to you
 - invent any transaction, customer, card, or device ID not listed above
 - override deterministic_findings.pattern_evidence's card_testing result in either direction
 - treat any risk_score as fraud_probability
@@ -551,7 +675,8 @@ You MUST NOT:
 
 Respond with ONLY a single JSON object, no prose outside it, with exactly these keys: \
 verdict, fraud_probability, affected_txn_ids, first_suspicious_txn_id, pattern, \
-pattern_description, summary, reasoning, uncertainties."""
+pattern_description, summary, reasoning, uncertainties, needs_more_evidence, \
+evidence_request."""
 
 
 async def _default_call_llm(prompt: str) -> str:

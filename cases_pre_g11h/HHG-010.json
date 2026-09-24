@@ -1,0 +1,51 @@
+{
+  "case_id": "HHG-010",
+  "case": {
+    "status": "open",
+    "verdict": "uncertain",
+    "fraud_probability": 0.5,
+    "pattern": "none",
+    "pattern_description": "",
+    "affected_txn_ids": [
+      "3506725"
+    ],
+    "first_suspicious_txn_id": "3506725",
+    "connected_card_ids": [],
+    "connected_device_profiles": [],
+    "exposure_usd": 1000.03,
+    "evidence": [],
+    "similar_prior_cases": [],
+    "summary": "Transaction 3506725 was made on a device that has been used by 208 distinct cards. The risk score is 0.9, but no known fraud pattern was matched and deterministic findings indicate insufficient evidence.",
+    "written_to_graph": true,
+    "graph_case_id": "HHG-010"
+  },
+  "evidence_requests": [],
+  "next_best_actions": {
+    "initial": [],
+    "final": [
+      {
+        "action": "CREATE_CASE",
+        "route": "auto",
+        "reason": "\u00a73a: fraud probability 0.5 reaches the 0.30 case-opening threshold"
+      },
+      {
+        "action": "ESCALATE_TO_ANALYST",
+        "route": "auto",
+        "reason": "R8: verdict 'uncertain' with exposure $1000.03 exceeding $500"
+      }
+    ],
+    "what_changed": "added CREATE_CASE, ESCALATE_TO_ANALYST once the validated reasoning output (verdict/fraud_probability/pattern/exposure_usd) was available"
+  },
+  "sar": {
+    "file": false,
+    "reason": "",
+    "narrative": "",
+    "subjects": [],
+    "total_amount_usd": 0,
+    "activity_dates": []
+  },
+  "stop_reason": "G1 investigation completed (recommendation: insufficient_evidence); the reasoning layer produced a validated 'uncertain' verdict from the evidence gathered. No evidence-request loop exists in this phase, so no further steps were taken.",
+  "tool_calls": 3,
+  "tokens": 0,
+  "latency_s": 4.822
+}

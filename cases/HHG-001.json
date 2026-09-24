@@ -3,13 +3,13 @@
   "case": {
     "status": "closed_fraud",
     "verdict": "fraud",
-    "fraud_probability": 0.92,
-    "pattern": "undocumented",
-    "pattern_description": "No known fraud pattern matched the evidence for this transaction. The transaction lacks characteristics of card_testing, card_not_present_fraud, card_not_present_new_device, out_of_region_use, account_takeover. Thus, pattern remains undocumented.",
+    "fraud_probability": 0.9,
+    "pattern": "out_of_region_use",
+    "pattern_description": "",
     "affected_txn_ids": [
       "3514030"
     ],
-    "first_suspicious_txn_id": "",
+    "first_suspicious_txn_id": "3514030",
     "connected_card_ids": [],
     "connected_device_profiles": [],
     "exposure_usd": 77.07,
@@ -32,7 +32,7 @@
       "CC-1066",
       "CC-1673"
     ],
-    "summary": "The transaction 3514030 is confirmed fraud by deterministic findings. No other transactions are linked to this fraud episode, and no established fraud pattern applies.",
+    "summary": "Transaction 3514030 is classified as fraud due to the customer\u2019s history of confirmed fraud cases and the high risk score for this transaction. The deterministic system recommends escalation.",
     "written_to_graph": true,
     "graph_case_id": "HHG-001"
   },
@@ -43,7 +43,7 @@
       {
         "action": "CREATE_CASE",
         "route": "auto",
-        "reason": "\u00a73a: fraud probability 0.92 reaches the 0.30 case-opening threshold"
+        "reason": "\u00a73a: fraud probability 0.9 reaches the 0.30 case-opening threshold"
       }
     ],
     "what_changed": "added CREATE_CASE once the validated reasoning output (verdict/fraud_probability/pattern/exposure_usd) was available"
@@ -59,5 +59,5 @@
   "stop_reason": "G1 investigation completed (recommendation: escalate); the reasoning layer produced a validated 'fraud' verdict from the evidence gathered. No evidence-request gap existed, so no further steps were taken.",
   "tool_calls": 3,
   "tokens": 0,
-  "latency_s": 8.617
+  "latency_s": 7.675
 }

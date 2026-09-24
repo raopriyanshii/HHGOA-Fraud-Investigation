@@ -3,19 +3,19 @@
   "case": {
     "status": "open",
     "verdict": "uncertain",
-    "fraud_probability": 0.2,
+    "fraud_probability": 0.3,
     "pattern": "none",
     "pattern_description": "",
     "affected_txn_ids": [
       "3581141"
     ],
-    "first_suspicious_txn_id": "",
+    "first_suspicious_txn_id": "3581141",
     "connected_card_ids": [],
     "connected_device_profiles": [],
     "exposure_usd": 30.02,
     "evidence": [],
     "similar_prior_cases": [],
-    "summary": "Single transaction with one card; no evidence of fraud; deterministic findings indicate insufficient evidence and recommend case creation; no pattern matched.",
+    "summary": "Customer disputes a single online transaction; deterministic evidence shows no fraud indicators, and policy recommends case creation but not fraud action.",
     "written_to_graph": true,
     "graph_case_id": "HHG-009"
   },
@@ -61,8 +61,8 @@
     "total_amount_usd": 0,
     "activity_dates": []
   },
-  "stop_reason": "G1 investigation completed (recommendation: insufficient_evidence); the reasoning layer produced a validated 'uncertain' verdict from the evidence gathered. One evidence request was simulated and its assumed response applied to the final next-best-action recommendation (see evidence_requests).",
-  "tool_calls": 3,
+  "stop_reason": "G1 investigation completed (recommendation: insufficient_evidence); the reasoning layer produced a validated 'uncertain' verdict from the evidence gathered. One evidence request was simulated and its assumed response applied to the final next-best-action recommendation (see evidence_requests). An additional historical_case_evidence request for card C00031:20493 was made and a second reasoning pass incorporated it before this verdict was reached.",
+  "tool_calls": 4,
   "tokens": 0,
-  "latency_s": 8.238
+  "latency_s": 6.144
 }

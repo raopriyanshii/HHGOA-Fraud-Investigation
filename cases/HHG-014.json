@@ -4,7 +4,7 @@
     "status": "closed_fraud",
     "verdict": "fraud",
     "fraud_probability": 0.9,
-    "pattern": "none",
+    "pattern": "card_not_present_fraud",
     "pattern_description": "",
     "affected_txn_ids": [
       "3477218",
@@ -165,7 +165,7 @@
       }
     ],
     "similar_prior_cases": [],
-    "summary": "The device used for the transaction is linked to 27 confirmed fraud cards and 52 distinct customers, indicating compromised activity. The transaction\u2019s card (C13487:13250) appears in the device\u2019s card list. Deterministic findings recommend monitoring and case creation, and prohibit blocking all cards due to lack of credential\u2011compromise evidence.",
+    "summary": "Device evidence shows the mobile device is shared by many cards, 27 of which have confirmed fraud. The transaction is online, debit card, and matches typical card\u2011not\u2011present fraud. System recommendations include monitoring and blocking all cards, supporting a fraud verdict.",
     "written_to_graph": true,
     "graph_case_id": "HHG-014"
   },
@@ -205,7 +205,7 @@
   "sar": {
     "file": true,
     "reason": "R6: shared device profile 'SM-G935F Build/NRD90M|Android 7.0|chrome 62.0 for android|1920x1080' shows independently confirmed fraud on another card",
-    "narrative": "This report concerns customer C13487, card C13487:13250. The investigation's reasoning layer reached a 'fraud' verdict with a fraud probability of 0.9. 3 transaction(s) were identified as part of this episode, totaling $142.0. The earliest transaction identified as part of this episode is 3477218. The activity occurred between 2016-11-21 and 2016-11-22. The flagged transaction is billed in region 191.0. R6: shared device profile 'SM-G935F Build/NRD90M|Android 7.0|chrome 62.0 for android|1920x1080' shows independently confirmed fraud on another card. 27 other card(s) sharing this element already show confirmed fraud: C01935:13347, C01996:12505, C02910:12043, C02975:20289, C03528:14407, and others. The device used for the transaction is linked to 27 confirmed fraud cards and 52 distinct customers, indicating compromised activity. The transaction\u2019s card (C13487:13250) appears in the device\u2019s card list. Deterministic findings recommend monitoring and case creation, and prohibit blocking all cards due to lack of credential\u2011compromise evidence.",
+    "narrative": "This report concerns customer C13487, card C13487:13250. The investigation's reasoning layer reached a 'fraud' verdict with a fraud probability of 0.9. 3 transaction(s) were identified as part of this episode, totaling $142.0. The identified pattern is card_not_present_fraud. The earliest transaction identified as part of this episode is 3477218. The activity occurred between 2016-11-21 and 2016-11-22. The flagged transaction is billed in region 191.0. R6: shared device profile 'SM-G935F Build/NRD90M|Android 7.0|chrome 62.0 for android|1920x1080' shows independently confirmed fraud on another card. 27 other card(s) sharing this element already show confirmed fraud: C01935:13347, C01996:12505, C02910:12043, C02975:20289, C03528:14407, and others. Device evidence shows the mobile device is shared by many cards, 27 of which have confirmed fraud. The transaction is online, debit card, and matches typical card\u2011not\u2011present fraud. System recommendations include monitoring and blocking all cards, supporting a fraud verdict.",
     "subjects": [
       "C13487",
       "C13487:13250",
@@ -225,5 +225,5 @@
   "stop_reason": "G1 investigation completed (recommendation: monitor); the reasoning layer produced a validated 'fraud' verdict from the evidence gathered. No evidence-request gap existed, so no further steps were taken.",
   "tool_calls": 4,
   "tokens": 0,
-  "latency_s": 9.443
+  "latency_s": 6.287
 }

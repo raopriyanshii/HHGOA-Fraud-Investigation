@@ -1029,3 +1029,414 @@ def test_sar_file_false_subjects_unaffected_by_cap_fix():
     call_llm = _fake_call_llm(_valid_llm_response(verdict="legitimate", fraud_probability=0.05))
     outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
     assert outcome["sar"] == {"file": False, "reason": "", "narrative": "", "subjects": [], "total_amount_usd": 0, "activity_dates": []}
+
+
+# --- pre/post evidence delta (internal-only audit field, not organizer schema) ---
+
+def test_evidence_delta_helper_direct():
+    g2_final = _base_g2_result(recommended=[{"action": "CREATE_CASE", "route": "auto", "reason": "R6"}])
+    g2_after_response = _base_g2_result(recommended=[
+        {"action": "CREATE_CASE", "route": "auto", "reason": "R6"},
+        {"action": "MONITOR_CARD", "route": "auto", "reason": "R4: no reply within 24 hours (simulated benchmark response)"},
+    ])
+    delta = co._evidence_delta(g2_final, g2_after_response)
+    assert delta["pre_evidence_actions"] == [{"action": "CREATE_CASE", "route": "auto", "reason": "R6"}]
+    assert delta["post_evidence_actions"] == [
+        {"action": "CREATE_CASE", "route": "auto", "reason": "R6"},
+        {"action": "MONITOR_CARD", "route": "auto", "reason": "R4: no reply within 24 hours (simulated benchmark response)"},
+    ]
+    assert delta["added_by_evidence_response"] == [
+        {"action": "MONITOR_CARD", "route": "auto", "reason": "R4: no reply within 24 hours (simulated benchmark response)"},
+    ]
+
+
+def test_evidence_delta_present_and_correct_for_evidence_request_case():
+    ledger = _base_ledger()
+    g2_result = g2_policy.evaluate(ledger)
+    call_llm = _fake_call_llm(_valid_llm_response(verdict="uncertain", fraud_probability=0.3))
+    outcome = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm))
+    assert outcome["ok"] is True
+    assert outcome["evidence_requests"] != []  # confirms this scenario genuinely triggers the loop
+    delta = outcome["evidence_delta"]
+    assert delta is not None
+
+    # Independently reconstruct the pre- and post-evidence-response G2
+    # passes from the SAME validated fields the real pipeline produced,
+    # to prove pre_evidence_actions is g2_result_final (post-reasoning,
+    # PRE-evidence-response) and post_evidence_actions is the response-
+    # adjusted pass -- never the original pre-reasoning g2_result and
+    # never next_best_actions["initial"].
+    reconstructed_validated = {
+        "verdict": outcome["case"]["verdict"],
+        "fraud_probability": outcome["case"]["fraud_probability"],
+        "pattern": outcome["case"]["pattern"],
+        "exposure_usd": outcome["case"]["exposure_usd"],
+    }
+    expected_pre = co._actions_from_g2_result(g2_policy.evaluate(ledger, reconstructed_validated))
+    expected_post = co._actions_from_g2_result(g2_policy.evaluate(ledger, reconstructed_validated, customer_response="no_reply"))
+
+    assert delta["pre_evidence_actions"] == expected_pre
+    assert delta["post_evidence_actions"] == expected_post
+
+    pre_names = {a["action"] for a in delta["pre_evidence_actions"]}
+    post_names = {a["action"] for a in delta["post_evidence_actions"]}
+    added_names = {a["action"] for a in delta["added_by_evidence_response"]}
+    assert added_names == post_names - pre_names  # only actions present after evidence but absent before
+
+
+def test_hhg009_like_case_post_evidence_includes_decline_and_monitor_card():
+    # Replicates the real HHG-009 benchmark shape: verdict=uncertain,
+    # fraud_probability=0.2 (< 0.70, R1's own gate), a single flagged
+    # transaction whose amount becomes the real exposure_usd.
+    ledger = _base_ledger()
+    ledger["full_evidence"]["combined_evidence"]["transaction"]["TransactionAmt"] = 30.02
+    ledger["full_evidence"]["combined_evidence"]["temporal_activity"][0]["TransactionAmt"] = 30.02
+    g2_result = g2_policy.evaluate(ledger)
+    call_llm = _fake_call_llm(_valid_llm_response(verdict="uncertain", fraud_probability=0.2, affected_txn_ids=[100]))
+    outcome = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm))
+    assert outcome["case"]["exposure_usd"] == 30.02
+
+    delta = outcome["evidence_delta"]
+    pre_names = {a["action"] for a in delta["pre_evidence_actions"]}
+    added_names = {a["action"] for a in delta["added_by_evidence_response"]}
+    # DECLINE_TRANSACTION and MONITOR_CARD are absent before evidence and
+    # present in added_by_evidence_response -- never asserted as already
+    # present pre-evidence, matching the real benchmark case exactly.
+    assert "DECLINE_TRANSACTION" not in pre_names
+    assert "MONITOR_CARD" not in pre_names
+    assert "DECLINE_TRANSACTION" in added_names
+    assert "MONITOR_CARD" in added_names
+
+
+def test_evidence_delta_absent_when_no_evidence_request():
+    ledger = _base_ledger()
+    g2_result = g2_policy.evaluate(ledger)
+    call_llm = _fake_call_llm(_valid_llm_response(verdict="legitimate", fraud_probability=0.05))
+    outcome = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm))
+    assert outcome["evidence_requests"] == []
+    assert outcome["evidence_delta"] is None
+    # every existing field remains present and correctly shaped -- purely additive
+    assert set(outcome.keys()) == {
+        "ok", "case", "evidence_requests", "next_best_actions", "sar", "stripped_ids", "stop_reason", "evidence_delta",
+        "evidence_request_outcome",
+    }
+    assert outcome["evidence_request_outcome"] is None  # no call_tool given, no request made either way
+
+
+def test_evidence_delta_is_deterministic_across_repeated_calls():
+    ledger = _base_ledger()
+    g2_result = g2_policy.evaluate(ledger)
+    call_llm = _fake_call_llm(_valid_llm_response(verdict="uncertain", fraud_probability=0.3))
+    outcome_1 = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm))
+    outcome_2 = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm))
+    assert outcome_1["evidence_delta"] == outcome_2["evidence_delta"]
+
+
+def test_evidence_delta_computation_makes_zero_mcp_or_tigergraph_calls(monkeypatch):
+    from src.graph import tigergraph_connection as tgc
+    from src.mcp_server import server as mcp_server_module
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("evidence_delta computation must never call TigerGraph/MCP directly")
+
+    monkeypatch.setattr(tgc, "get_connection", _fail_if_called)
+    monkeypatch.setattr(mcp_server_module.mcp, "call_tool", _fail_if_called)
+
+    ledger = _base_ledger()
+    g2_result = g2_policy.evaluate(ledger)
+    call_llm = _fake_call_llm(_valid_llm_response(verdict="uncertain", fraud_probability=0.3))
+    outcome = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm))
+    assert outcome["evidence_delta"] is not None  # would have raised above if either entry point were touched
+
+
+def test_evidence_delta_never_merged_into_similar_prior_cases_or_case_evidence():
+    ledger = _base_ledger()
+    g2_result = g2_policy.evaluate(ledger)
+    call_llm = _fake_call_llm(_valid_llm_response(verdict="uncertain", fraud_probability=0.3))
+    outcome = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm))
+    assert outcome["evidence_delta"] is not None
+    assert "evidence_delta" not in outcome["case"]
+    assert outcome["case"]["similar_prior_cases"] == co._similar_prior_cases(ledger)
+    assert outcome["case"]["evidence"] == co._evidence_list(ledger, g2_result)
+
+
+# --- G14: iterative-evidence round 2 (needs_more_evidence / evidence_request) ---
+
+def _ledger_with_connected_via_device(*card_keys: str) -> dict:
+    ledger = _base_ledger()
+    ledger["full_evidence"]["combined_evidence"]["connected_cards"] = {
+        "connected_via_case": [],
+        "connected_via_device": [{"card_key": ck, "customer_id": ck.split(":")[0]} for ck in card_keys],
+    }
+    return ledger
+
+
+def _evidence_request_response(target_card_key, **overrides):
+    body = _valid_llm_response(**overrides)
+    body["needs_more_evidence"] = True
+    body["evidence_request"] = {
+        "type": "historical_case_evidence",
+        "target_card_key": target_card_key,
+        "reason": "check whether this connected card has its own confirmed-fraud history",
+    }
+    return body
+
+
+def _fake_evidence_call_tool(response=None, ok=True, error=None):
+    calls = []
+
+    async def call_tool(name, arguments):
+        calls.append((name, arguments))
+        if not ok:
+            return False, None, error or "simulated tool failure"
+        return True, response if response is not None else {"direct_cases": [], "connected_cases": []}, None
+
+    call_tool.calls = calls
+    return call_tool
+
+
+def _sequenced_call_llm(*response_dicts):
+    calls = []
+
+    async def call_llm(prompt):
+        calls.append(prompt)
+        return json.dumps(response_dicts[len(calls) - 1])
+
+    call_llm.calls = calls
+    return call_llm
+
+
+# A. needs_more_evidence=false: only one LLM call, zero additional tool calls, unchanged behavior
+
+def test_needs_more_evidence_false_makes_exactly_one_llm_call_and_zero_tool_calls():
+    ledger = _base_ledger()
+    g2_result = g2_policy.evaluate(ledger)
+    call_llm = _sequenced_call_llm(_valid_llm_response())
+    fake_tool = _fake_evidence_call_tool()
+
+    outcome = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm, call_tool=fake_tool))
+
+    assert outcome["ok"] is True
+    assert len(call_llm.calls) == 1
+    assert fake_tool.calls == []
+    assert outcome["evidence_request_outcome"] is None
+
+
+def test_needs_more_evidence_false_behavior_identical_with_or_without_call_tool():
+    ledger = _base_ledger()
+    g2_result = g2_policy.evaluate(ledger)
+
+    outcome_without = run(co.investigate_and_assemble(
+        ledger, g2_result, call_llm=_sequenced_call_llm(_valid_llm_response()),
+    ))
+    outcome_with = run(co.investigate_and_assemble(
+        ledger, g2_result, call_llm=_sequenced_call_llm(_valid_llm_response()), call_tool=_fake_evidence_call_tool(),
+    ))
+    assert outcome_without["case"] == outcome_with["case"]
+    assert outcome_without["next_best_actions"] == outcome_with["next_best_actions"]
+
+
+# B. valid evidence request: Q4 called exactly once, round 2 LLM called exactly once,
+# additional evidence stored separately, total LLM calls = 2
+
+def test_valid_evidence_request_calls_q4_once_and_llm_twice_total():
+    ledger = _ledger_with_connected_via_device("C99999:1")
+    g2_result = g2_policy.evaluate(ledger)
+    call_llm = _sequenced_call_llm(
+        _evidence_request_response("C99999:1", verdict="uncertain", fraud_probability=0.4),
+        _valid_llm_response(verdict="fraud", fraud_probability=0.9, affected_txn_ids=[100], first_suspicious_txn_id=100),
+    )
+    fake_tool = _fake_evidence_call_tool(response={"direct_cases": [{"case_id": "CC-9", "outcome": "confirmed_fraud"}], "connected_cases": []})
+
+    outcome = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm, call_tool=fake_tool))
+
+    assert outcome["ok"] is True
+    assert len(call_llm.calls) == 2
+    assert len(fake_tool.calls) == 1
+    assert fake_tool.calls[0] == ("historical_case_evidence", {"card_key": "C99999:1"})
+
+    # round 2's own result (fraud/0.9) is what the final case reflects --
+    # not round 1's (uncertain/0.4):
+    assert outcome["case"]["verdict"] == "fraud"
+    assert outcome["case"]["fraud_probability"] == 0.9
+
+    info = outcome["evidence_request_outcome"]
+    assert info["requested"] is True
+    assert info["accepted"] is True
+    assert info["target_card_key"] == "C99999:1"
+    assert info["round2_attempted"] is True
+    assert info["round2_ok"] is True
+
+    # the additional evidence reached round 2's own prompt, clearly labeled:
+    round2_prompt = call_llm.calls[1]
+    assert "ADDITIONAL EVIDENCE" in round2_prompt
+    assert "C99999:1" in round2_prompt
+    assert "CC-9" in round2_prompt
+
+
+def test_stop_reason_mentions_both_when_g12_and_g14_both_fire():
+    # Bug fix: when G14's own round 2 still leaves the verdict "uncertain"
+    # below G12's R1 threshold (0.70), the G12 evidence-request loop also
+    # fires on that same final result -- stop_reason must mention BOTH,
+    # not let one silently override the other.
+    ledger = _ledger_with_connected_via_device("C99999:1")
+    g2_result = g2_policy.evaluate(ledger)
+    call_llm = _sequenced_call_llm(
+        _evidence_request_response("C99999:1", verdict="uncertain", fraud_probability=0.4),
+        _valid_llm_response(verdict="uncertain", fraud_probability=0.3),
+    )
+    fake_tool = _fake_evidence_call_tool()
+
+    outcome = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm, call_tool=fake_tool))
+
+    assert outcome["ok"] is True
+    assert outcome["evidence_requests"] != []  # G12 fired
+    assert outcome["evidence_request_outcome"]["round2_ok"] is True  # G14 fired
+    assert "evidence request was simulated" in outcome["stop_reason"]
+    assert "historical_case_evidence request for card C99999:1" in outcome["stop_reason"]
+
+
+def test_valid_evidence_request_round2_failure_falls_back_to_round1_result():
+    ledger = _ledger_with_connected_via_device("C99999:1")
+    g2_result = g2_policy.evaluate(ledger)
+
+    async def failing_second_call(prompt):
+        if not hasattr(failing_second_call, "n"):
+            failing_second_call.n = 0
+        failing_second_call.n += 1
+        if failing_second_call.n == 1:
+            return json.dumps(_evidence_request_response("C99999:1", verdict="uncertain", fraud_probability=0.4))
+        raise RuntimeError("simulated round-2 provider failure")
+
+    fake_tool = _fake_evidence_call_tool()
+    outcome = run(co.investigate_and_assemble(ledger, g2_result, call_llm=failing_second_call, call_tool=fake_tool))
+
+    # round 2 failed, but the whole investigation does not -- round 1's
+    # own already-valid result is used as final, matching "preserve
+    # existing safe behavior":
+    assert outcome["ok"] is True
+    assert outcome["case"]["verdict"] == "uncertain"
+    assert outcome["case"]["fraud_probability"] == 0.4
+    info = outcome["evidence_request_outcome"]
+    assert info["accepted"] is True
+    assert info["round2_attempted"] is True
+    assert info["round2_ok"] is False
+
+
+# C. invalid target card: Q4 NOT called, no second LLM call, validation
+# failure recorded, no invented evidence introduced
+
+def test_invalid_target_card_key_rejected_no_q4_call_no_second_llm_call():
+    ledger = _ledger_with_connected_via_device("C11111:1")  # a real card, but NOT the one requested
+    g2_result = g2_policy.evaluate(ledger)
+    call_llm = _sequenced_call_llm(
+        _evidence_request_response("C_NOT_REAL:9", verdict="uncertain", fraud_probability=0.4),
+    )
+    fake_tool = _fake_evidence_call_tool()
+
+    outcome = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm, call_tool=fake_tool))
+
+    assert outcome["ok"] is True  # round 1's own result is still perfectly valid and used
+    assert len(call_llm.calls) == 1  # no second LLM call
+    assert fake_tool.calls == []  # Q4 never called
+    assert outcome["case"]["verdict"] == "uncertain"  # round 1's own verdict, unchanged
+
+    info = outcome["evidence_request_outcome"]
+    assert info["requested"] is True
+    assert info["target_card_key"] == "C_NOT_REAL:9"
+    assert info["accepted"] is False
+    assert info["rejection_reason"] == "target_card_key_not_in_connected_via_device"
+    assert info["round2_attempted"] is False
+
+
+def test_invalid_target_card_key_with_no_connected_via_device_at_all():
+    ledger = _base_ledger()  # no connected cards of any kind
+    g2_result = g2_policy.evaluate(ledger)
+    call_llm = _sequenced_call_llm(_evidence_request_response("C_ANY:1"))
+    fake_tool = _fake_evidence_call_tool()
+
+    outcome = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm, call_tool=fake_tool))
+
+    assert outcome["ok"] is True
+    assert fake_tool.calls == []
+    assert outcome["evidence_request_outcome"]["accepted"] is False
+
+
+# D. invalid evidence type: rejected at the validator (whole round-1
+# response fails), no tool call -- case_output.py never even reaches its
+# own evidence-request logic in this case.
+
+def test_invalid_evidence_type_fails_round1_validation_no_tool_call():
+    ledger = _ledger_with_connected_via_device("C99999:1")
+    g2_result = g2_policy.evaluate(ledger)
+    bad_response = _valid_llm_response()
+    bad_response["needs_more_evidence"] = True
+    bad_response["evidence_request"] = {"type": "some_made_up_tool", "target_card_key": "C99999:1", "reason": "x"}
+    call_llm = _sequenced_call_llm(bad_response)
+    fake_tool = _fake_evidence_call_tool()
+
+    outcome = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm, call_tool=fake_tool))
+
+    assert outcome["ok"] is False
+    assert outcome["failure_reason"] == "invalid_evidence_request"
+    assert fake_tool.calls == []
+    assert len(call_llm.calls) == 1
+
+
+# E. call_tool is invoked at most once, structurally -- never more than
+# one additional tool call regardless of what round 1 returns.
+
+def test_call_tool_never_invoked_more_than_once():
+    ledger = _ledger_with_connected_via_device("C99999:1")
+    g2_result = g2_policy.evaluate(ledger)
+    call_llm = _sequenced_call_llm(
+        _evidence_request_response("C99999:1"),
+        _valid_llm_response(),
+    )
+    fake_tool = _fake_evidence_call_tool()
+    run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm, call_tool=fake_tool))
+    assert len(fake_tool.calls) <= 1
+
+
+def test_call_tool_is_none_disables_the_mechanism_entirely_regardless_of_llm_output():
+    # call_tool omitted entirely (the default) -- even a real
+    # needs_more_evidence=true response can never trigger a tool call or
+    # a second LLM call, matching every pre-G14 caller/test exactly.
+    ledger = _ledger_with_connected_via_device("C99999:1")
+    g2_result = g2_policy.evaluate(ledger)
+    call_llm = _sequenced_call_llm(_evidence_request_response("C99999:1"))
+    outcome = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm))
+    assert outcome["ok"] is True
+    assert len(call_llm.calls) == 1
+    assert outcome["evidence_request_outcome"] is None
+
+
+# F. schema compatibility: organizer submission remains exactly the same 9 top-level keys
+
+def test_organizer_submission_schema_unaffected_by_evidence_request_mechanism():
+    from src.benchmark import submission_adapter
+
+    ledger = _ledger_with_connected_via_device("C99999:1")
+    g2_result = g2_policy.evaluate(ledger)
+    call_llm = _sequenced_call_llm(
+        _evidence_request_response("C99999:1"),
+        _valid_llm_response(verdict="fraud", fraud_probability=0.9),
+    )
+    fake_tool = _fake_evidence_call_tool(response={"direct_cases": [{"case_id": "CC-9", "outcome": "confirmed_fraud"}], "connected_cases": []})
+    outcome = run(co.investigate_and_assemble(ledger, g2_result, call_llm=call_llm, call_tool=fake_tool))
+    assert outcome["evidence_request_outcome"]["round2_ok"] is True  # confirm the mechanism actually ran
+
+    result = {
+        "case_id": "HHG-TEST", "success": True, "outcome": outcome,
+        "written_to_graph": False, "graph_case_id": "",
+        "timing_s": {"total": 1.0}, "g1": {"tool_calls": []},
+    }
+    submission = submission_adapter.build_submission_case(result)
+    assert set(submission.keys()) == {
+        "case_id", "case", "evidence_requests", "next_best_actions", "sar",
+        "stop_reason", "tool_calls", "tokens", "latency_s",
+    }
+    assert "evidence_delta" not in submission
+    assert "evidence_request_outcome" not in submission
+    assert "needs_more_evidence" not in submission["case"]
+    assert "evidence_request" not in submission["case"]

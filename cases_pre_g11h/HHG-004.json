@@ -3,39 +3,23 @@
   "case": {
     "status": "closed_fraud",
     "verdict": "fraud",
-    "fraud_probability": 0.95,
+    "fraud_probability": 0.97,
     "pattern": "card_not_present_fraud",
     "pattern_description": "",
     "affected_txn_ids": [
-      "3580804",
-      "3583227",
-      "3583499",
-      "3583503",
-      "3584017",
-      "3585446"
+      "3583227"
     ],
-    "first_suspicious_txn_id": "3580804",
+    "first_suspicious_txn_id": "3583227",
     "connected_card_ids": [],
     "connected_device_profiles": [],
-    "exposure_usd": 343.58,
-    "evidence": [
-      {
-        "claim": "G1 escalation basis: the customer's own historical case record includes at least one confirmed-fraud case",
-        "source": "graph",
-        "ref": "g1:recommendation_basis",
-        "entity_ids": [
-          "CC-1736",
-          "CC-2121",
-          "CC-3778"
-        ]
-      }
-    ],
+    "exposure_usd": 128.33,
+    "evidence": [],
     "similar_prior_cases": [
       "CC-3778",
       "CC-1736",
       "CC-2121"
     ],
-    "summary": "This card has three prior confirmed card\u2011not\u2011present fraud cases. The current online transaction matches that pattern and has been escalated. The deterministic logic recommends escalation.",
+    "summary": "The transaction 3583227 was confirmed fraud by a direct investigation and aligns with the card_not_present_fraud pattern observed in prior cases for the same card. No conflicting evidence exists.",
     "written_to_graph": true,
     "graph_case_id": "HHG-004"
   },
@@ -65,8 +49,8 @@
     "total_amount_usd": 0,
     "activity_dates": []
   },
-  "stop_reason": "G1 investigation completed (recommendation: escalate); the reasoning layer produced a validated 'fraud' verdict from the evidence gathered. No evidence-request gap existed, so no further steps were taken.",
+  "stop_reason": "G1 investigation completed (recommendation: escalate); the reasoning layer produced a validated 'fraud' verdict from the evidence gathered. No evidence-request loop exists in this phase, so no further steps were taken.",
   "tool_calls": 3,
   "tokens": 0,
-  "latency_s": 4.55
+  "latency_s": 4.466
 }

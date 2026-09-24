@@ -1,0 +1,176 @@
+{
+  "case_id": "HHG-011",
+  "case": {
+    "status": "closed_fraud",
+    "verdict": "fraud",
+    "fraud_probability": 0.9,
+    "pattern": "card_testing",
+    "pattern_description": "",
+    "affected_txn_ids": [
+      "3582602",
+      "3582624",
+      "3582671",
+      "3582738",
+      "3582868",
+      "3582897",
+      "3583101",
+      "3583140",
+      "3583199",
+      "3583229",
+      "3583368"
+    ],
+    "first_suspicious_txn_id": "3582602",
+    "connected_card_ids": [],
+    "connected_device_profiles": [],
+    "exposure_usd": 549.87,
+    "evidence": [
+      {
+        "claim": "R5 card-testing shape detected: three or more small online authorizations within an hour, followed by a strictly larger purchase (see candidates for exact windows)",
+        "source": "graph",
+        "ref": "pattern:classify_card_testing",
+        "entity_ids": [
+          "3580907",
+          "3580933",
+          "3580951",
+          "3582082",
+          "3582107",
+          "3582142",
+          "3582175",
+          "3582178",
+          "3582327",
+          "3582338",
+          "3582375",
+          "3582413",
+          "3582602",
+          "3582624",
+          "3582671",
+          "3582738",
+          "3582868",
+          "3582897",
+          "3583101",
+          "3583140",
+          "3583199",
+          "3583229",
+          "3583348",
+          "3583368",
+          "3583406",
+          "3583411",
+          "3583415",
+          "3583417",
+          "3583435",
+          "3583494",
+          "3583670",
+          "3583866",
+          "3583914",
+          "3583968",
+          "3584003",
+          "3584153",
+          "3584155",
+          "3584401",
+          "3584859",
+          "3584962",
+          "3584985",
+          "3585055",
+          "3585064",
+          "3585345"
+        ]
+      },
+      {
+        "claim": "R6: shared non-hub device/region evidence shows independently confirmed fraud on another card",
+        "source": "graph",
+        "ref": "tool:cross_card_fraud_verification",
+        "entity_ids": []
+      }
+    ],
+    "similar_prior_cases": [
+      "CC-4501",
+      "CC-1056",
+      "CC-2247",
+      "CC-3905",
+      "CC-3206",
+      "CC-0031",
+      "CC-2673",
+      "CC-2799",
+      "CC-0290",
+      "CC-3039"
+    ],
+    "summary": "Pattern evidence confirms a card testing episode: three or more small online authorizations within an hour followed by a larger purchase. The deterministic findings flag the transaction as fraudulent and recommend escalation.",
+    "written_to_graph": true,
+    "graph_case_id": "HHG-011"
+  },
+  "evidence_requests": [],
+  "next_best_actions": {
+    "initial": [
+      {
+        "action": "DECLINE_TRANSACTION",
+        "route": "L1",
+        "reason": "R5: three or more small online authorizations within an hour, followed by a larger purchase"
+      },
+      {
+        "action": "MONITOR_CONNECTED_CARDS",
+        "route": "auto",
+        "reason": "R6: shared non-hub device/region evidence shows independently confirmed fraud on another card"
+      },
+      {
+        "action": "STEP_UP_AUTH",
+        "route": "auto",
+        "reason": "R5: three or more small online authorizations within an hour, followed by a larger purchase"
+      },
+      {
+        "action": "CREATE_CASE",
+        "route": "auto",
+        "reason": "\u00a73a: customer disputes a charge (trigger_type == 'customer_report')"
+      },
+      {
+        "action": "FILE_REPORT",
+        "route": "L2",
+        "reason": "R6: shared non-hub device/region evidence shows independently confirmed fraud on another card"
+      }
+    ],
+    "final": [
+      {
+        "action": "DECLINE_TRANSACTION",
+        "route": "L1",
+        "reason": "R5: three or more small online authorizations within an hour, followed by a larger purchase"
+      },
+      {
+        "action": "MONITOR_CONNECTED_CARDS",
+        "route": "auto",
+        "reason": "R6: shared non-hub device/region evidence shows independently confirmed fraud on another card"
+      },
+      {
+        "action": "STEP_UP_AUTH",
+        "route": "auto",
+        "reason": "R5: three or more small online authorizations within an hour, followed by a larger purchase"
+      },
+      {
+        "action": "BLOCK_CARD",
+        "route": "L1",
+        "reason": "R5: a $131.3 purchase has already cleared (over $100); exposure $549.87 sets the L1/L2 route"
+      },
+      {
+        "action": "CREATE_CASE",
+        "route": "auto",
+        "reason": "\u00a73a: customer disputes a charge (trigger_type == 'customer_report')"
+      },
+      {
+        "action": "FILE_REPORT",
+        "route": "L2",
+        "reason": "R6: shared non-hub device/region evidence shows independently confirmed fraud on another card"
+      }
+    ],
+    "what_changed": "added BLOCK_CARD once the validated reasoning output (verdict/fraud_probability/pattern/exposure_usd) was available"
+  },
+  "sar": {
+    "file": true,
+    "reason": "R6: shared non-hub device/region evidence shows independently confirmed fraud on another card",
+    "narrative": "",
+    "subjects": [],
+    "total_amount_usd": 0,
+    "activity_dates": []
+  },
+  "stop_reason": "G1 investigation completed (recommendation: escalate); the reasoning layer produced a validated 'fraud' verdict from the evidence gathered. No evidence-request loop exists in this phase, so no further steps were taken.",
+  "tool_calls": 4,
+  "tokens": 0,
+  "latency_s": 12.623
+}

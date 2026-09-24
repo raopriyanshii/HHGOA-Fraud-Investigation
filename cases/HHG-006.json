@@ -1,28 +1,29 @@
 {
   "case_id": "HHG-006",
   "case": {
-    "status": "closed_fraud",
-    "verdict": "fraud",
-    "fraud_probability": 0.8,
-    "pattern": "card_not_present_fraud",
+    "status": "open",
+    "verdict": "uncertain",
+    "fraud_probability": 0.35,
+    "pattern": "none",
     "pattern_description": "",
-    "affected_txn_ids": [
-      "3476602",
-      "3476633",
-      "3476665",
-      "3476682"
-    ],
-    "first_suspicious_txn_id": "3476602",
+    "affected_txn_ids": [],
+    "first_suspicious_txn_id": "",
     "connected_card_ids": [],
     "connected_device_profiles": [],
-    "exposure_usd": 1906.07,
+    "exposure_usd": 0,
     "evidence": [],
     "similar_prior_cases": [],
-    "summary": "Device evidence shows a single desktop used by many distinct customers and cards, and the temporal activity contains a burst of online transactions from the same customer on that device. These facts point to card\u2011not\u2011present fraud.",
+    "summary": "Online transaction flagged; no device or card link found; pattern evidence not matched; insufficient data to confirm fraud or legitimacy.",
     "written_to_graph": true,
     "graph_case_id": "HHG-006"
   },
-  "evidence_requests": [],
+  "evidence_requests": [
+    {
+      "type": "customer_validation",
+      "asked_after_step": 2,
+      "assumed_response": "Simulated customer validation response: no reply within the 24-hour window. Benchmark simulation only -- no real 24 hours elapsed and no real customer/analyst reply was received; this project has no live customer or analyst channel (organizer README, policy \u00a75). This is the one, fixed assumption always made when evidence is requested, recorded here honestly as state='no_reply'."
+    }
+  ],
   "next_best_actions": {
     "initial": [
       {
@@ -33,12 +34,22 @@
     ],
     "final": [
       {
+        "action": "DECLINE_TRANSACTION",
+        "route": "L1",
+        "reason": "R4: no reply within 24 hours (simulated benchmark response); decline pending authorizations"
+      },
+      {
+        "action": "MONITOR_CARD",
+        "route": "auto",
+        "reason": "R4: no reply within 24 hours (simulated benchmark response)"
+      },
+      {
         "action": "CREATE_CASE",
         "route": "auto",
         "reason": "\u00a73a: customer disputes a charge (trigger_type == 'customer_report')"
       }
     ],
-    "what_changed": "nothing"
+    "what_changed": "added DECLINE_TRANSACTION, MONITOR_CARD once the validated reasoning output (verdict/fraud_probability/pattern/exposure_usd) was available"
   },
   "sar": {
     "file": false,
@@ -48,8 +59,8 @@
     "total_amount_usd": 0,
     "activity_dates": []
   },
-  "stop_reason": "G1 investigation completed (recommendation: insufficient_evidence); the reasoning layer produced a validated 'fraud' verdict from the evidence gathered. No evidence-request gap existed, so no further steps were taken.",
+  "stop_reason": "G1 investigation completed (recommendation: insufficient_evidence); the reasoning layer produced a validated 'uncertain' verdict from the evidence gathered. One evidence request was simulated and its assumed response applied to the final next-best-action recommendation (see evidence_requests).",
   "tool_calls": 3,
   "tokens": 0,
-  "latency_s": 10.618
+  "latency_s": 6.774
 }

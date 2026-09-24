@@ -347,3 +347,120 @@ def test_hhg011_real_overlapping_candidates_grounded_and_exposure_correct():
     # exact real-dollar exposure sum over the deduplicated, grounded set:
     expected = round(16.17 + 23.78 + 52.17 + 62.11 + 62.06 + 131.30, 2)
     assert result["exposure_usd"] == expected
+
+
+# --- G14: needs_more_evidence / evidence_request ---
+
+def test_needs_more_evidence_absent_defaults_to_false_for_pre_g14_fixtures():
+    # Every pre-G14 raw-response fixture in this project (including
+    # _valid_raw() above) omits these keys entirely -- this must never
+    # be treated as malformed_output.
+    result = rv.validate_reasoning_output(_valid_raw(), _package())
+    assert result["ok"] is True
+    assert result["needs_more_evidence"] is False
+    assert result["evidence_request"] is None
+
+
+def test_needs_more_evidence_must_be_a_boolean():
+    raw = _valid_raw(needs_more_evidence="yes")
+    result = rv.validate_reasoning_output(raw, _package())
+    assert result["ok"] is False
+    assert result["failure_reason"] == "malformed_output"
+
+
+def test_valid_evidence_request_is_accepted_and_returned():
+    raw = _valid_raw(
+        needs_more_evidence=True,
+        evidence_request={"type": "historical_case_evidence", "target_card_key": "C99999:1", "reason": "check sibling history"},
+    )
+    result = rv.validate_reasoning_output(raw, _package())
+    assert result["ok"] is True
+    assert result["needs_more_evidence"] is True
+    assert result["evidence_request"] == {
+        "type": "historical_case_evidence", "target_card_key": "C99999:1", "reason": "check sibling history",
+    }
+
+
+def test_evidence_request_missing_when_needs_more_evidence_true_is_rejected():
+    raw = _valid_raw(needs_more_evidence=True, evidence_request=None)
+    result = rv.validate_reasoning_output(raw, _package())
+    assert result["ok"] is False
+    assert result["failure_reason"] == "invalid_evidence_request"
+
+
+def test_evidence_request_non_null_when_needs_more_evidence_false_is_normalized_not_rejected():
+    # Deterministic override, same discipline as pattern_description --
+    # the LLM's own primary signal (needs_more_evidence=False) wins over
+    # an inconsistent, populated evidence_request, and the whole response
+    # is not thrown away over one inconsistent nullable field.
+    raw = _valid_raw(
+        needs_more_evidence=False,
+        evidence_request={"type": "historical_case_evidence", "target_card_key": "C1:1", "reason": "x"},
+    )
+    result = rv.validate_reasoning_output(raw, _package())
+    assert result["ok"] is True
+    assert result["evidence_request"] is None
+
+
+def test_invalid_evidence_request_type_is_rejected():
+    raw = _valid_raw(
+        needs_more_evidence=True,
+        evidence_request={"type": "some_made_up_tool", "target_card_key": "C1:1", "reason": "x"},
+    )
+    result = rv.validate_reasoning_output(raw, _package())
+    assert result["ok"] is False
+    assert result["failure_reason"] == "invalid_evidence_request"
+
+
+def test_evidence_request_as_list_is_rejected_never_treated_as_multiple_requests():
+    raw = _valid_raw(
+        needs_more_evidence=True,
+        evidence_request=[{"type": "historical_case_evidence", "target_card_key": "C1:1", "reason": "x"}],
+    )
+    result = rv.validate_reasoning_output(raw, _package())
+    assert result["ok"] is False
+    assert result["failure_reason"] == "invalid_evidence_request"
+
+
+def test_evidence_request_empty_target_card_key_is_rejected():
+    raw = _valid_raw(
+        needs_more_evidence=True,
+        evidence_request={"type": "historical_case_evidence", "target_card_key": "  ", "reason": "x"},
+    )
+    result = rv.validate_reasoning_output(raw, _package())
+    assert result["ok"] is False
+    assert result["failure_reason"] == "invalid_evidence_request"
+
+
+def test_evidence_request_empty_reason_is_rejected():
+    raw = _valid_raw(
+        needs_more_evidence=True,
+        evidence_request={"type": "historical_case_evidence", "target_card_key": "C1:1", "reason": ""},
+    )
+    result = rv.validate_reasoning_output(raw, _package())
+    assert result["ok"] is False
+    assert result["failure_reason"] == "invalid_evidence_request"
+
+
+def test_evidence_request_target_card_key_wrong_type_is_rejected():
+    raw = _valid_raw(
+        needs_more_evidence=True,
+        evidence_request={"type": "historical_case_evidence", "target_card_key": 12345, "reason": "x"},
+    )
+    result = rv.validate_reasoning_output(raw, _package())
+    assert result["ok"] is False
+    assert result["failure_reason"] == "invalid_evidence_request"
+
+
+def test_this_validator_never_checks_target_card_key_against_the_ledger():
+    # By design (this phase): the graph-dependent anti-fabrication check
+    # belongs in case_output.py, which has the ledger -- this function
+    # never receives one and must accept a structurally well-formed
+    # request regardless of whether the card is real.
+    raw = _valid_raw(
+        needs_more_evidence=True,
+        evidence_request={"type": "historical_case_evidence", "target_card_key": "C_MADE_UP:999", "reason": "x"},
+    )
+    result = rv.validate_reasoning_output(raw, _package())
+    assert result["ok"] is True
+    assert result["evidence_request"]["target_card_key"] == "C_MADE_UP:999"

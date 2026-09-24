@@ -3,22 +3,16 @@
   "case": {
     "status": "closed_fraud",
     "verdict": "fraud",
-    "fraud_probability": 0.85,
+    "fraud_probability": 0.97,
     "pattern": "undocumented",
-    "pattern_description": "No specific fraud pattern is conclusively matched. The evidence suggests a potential fraudulent episode but does not align with any predefined category.",
+    "pattern_description": "This transaction does not match any predefined fraud pattern. It was flagged based on direct evidence of fraud. No specific pattern such as card_not_present_fraud or card_testing was detected.",
     "affected_txn_ids": [
-      "3550470",
-      "3551245",
-      "3552000",
-      "3552020",
-      "3553253",
-      "3553342",
-      "3554541"
+      "3553342"
     ],
-    "first_suspicious_txn_id": "3550470",
+    "first_suspicious_txn_id": "",
     "connected_card_ids": [],
     "connected_device_profiles": [],
-    "exposure_usd": 425.66,
+    "exposure_usd": 30.91,
     "evidence": [
       {
         "claim": "G1 escalation basis: the customer's own historical case record includes at least one confirmed-fraud case",
@@ -32,7 +26,7 @@
     "similar_prior_cases": [
       "CC-2370"
     ],
-    "summary": "The flagged transaction triggers escalation due to direct confirmed fraud evidence and high risk score. A fraud episode involving multiple in-person transactions is likely.",
+    "summary": "The flagged transaction (ID 3553342) is confirmed fraud by deterministic analysis and is recommended for escalation. No pattern matched; the case is treated as undocumented fraud.",
     "written_to_graph": true,
     "graph_case_id": "HHG-012"
   },
@@ -43,7 +37,7 @@
       {
         "action": "CREATE_CASE",
         "route": "auto",
-        "reason": "\u00a73a: fraud probability 0.85 reaches the 0.30 case-opening threshold"
+        "reason": "\u00a73a: fraud probability 0.97 reaches the 0.30 case-opening threshold"
       }
     ],
     "what_changed": "added CREATE_CASE once the validated reasoning output (verdict/fraud_probability/pattern/exposure_usd) was available"
@@ -59,5 +53,5 @@
   "stop_reason": "G1 investigation completed (recommendation: escalate); the reasoning layer produced a validated 'fraud' verdict from the evidence gathered. No evidence-request gap existed, so no further steps were taken.",
   "tool_calls": 3,
   "tokens": 0,
-  "latency_s": 10.12
+  "latency_s": 5.294
 }

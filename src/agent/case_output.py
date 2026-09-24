@@ -3,10 +3,18 @@ G7 -- output assembly (isolated adapter).
 
 Combines the G1 ledger, the G2 policy result, and the validated LLM
 reasoning output into the organizer-required `case` object and
-`next_best_actions` object. Performs zero graph/LLM calls itself -- it
-only assembles already-computed, already-validated pieces, and it is the
-one place these three sources are combined: G1, G2, and the reasoning
-layer never see each other's output shape.
+`next_best_actions` object. It only assembles already-computed,
+already-validated pieces, and it is the one place these three sources
+are combined: G1, G2, and the reasoning layer never see each other's
+output shape.
+
+G14: this module now makes AT MOST ONE additional MCP tool call and AT
+MOST ONE additional LLM call, and only when the caller opts in by
+passing `call_tool` to investigate_and_assemble AND round 1's own
+validated output sets needs_more_evidence=true -- see
+_run_evidence_request_round. When `call_tool` is omitted (every
+pre-G14 caller and test), behavior is byte-for-byte the original
+zero-MCP-call, single-LLM-call guarantee, unconditionally.
 
 Scope: produces `case` (Part 1), `evidence_requests`, `next_best_actions`
 (Part 3), and `sar` (Part 2, G13). `next_best_actions.initial` still
@@ -41,10 +49,27 @@ or `graph_case_id` -- these remain later-phase work, not invented here.
 """
 from __future__ import annotations
 
+from typing import Any, Awaitable, Callable
+
 from src.agent import evidence_loop
 from src.agent.reasoning import DEFAULT_LLM_TIMEOUT_S, CallLLM, build_evidence_package, get_llm_reasoning
 from src.agent.reasoning_validator import validate_reasoning_output
+from src.graph.tigergraph_connection import scrub_secret
 from src.policy import g2_policy
+
+# G14 -- same structural shape as src.agent.workflow.CallTool /
+# src.agent.case_writer.CallTool, redefined locally rather than imported
+# cross-module (the established convention in this project -- G1, G2,
+# and the reasoning/output layer never import each other's internals).
+CallTool = Callable[[str, dict], Awaitable[tuple[bool, Any, str | None]]]
+
+# G14: the one registered evidence type this phase supports, and the one
+# real MCP tool it maps to -- never an LLM-chosen tool name, never
+# arbitrary GSQL. Extending this dict (never inferring a mapping) is how
+# a future evidence type would be added.
+_EVIDENCE_TYPE_TOOL_NAMES = {
+    "historical_case_evidence": "historical_case_evidence",
+}
 
 
 def _status_for(verdict: str, g1_recommendation: str | None) -> str:
@@ -126,6 +151,33 @@ def _next_best_actions(g2_result: dict, g2_result_final: dict | None = None) -> 
         return {"initial": initial, "final": initial, "what_changed": "nothing"}
     final = _actions_from_g2_result(g2_result_final)
     return {"initial": initial, "final": final, "what_changed": _describe_action_diff(initial, final)}
+
+
+def _evidence_delta(g2_result_final: dict, g2_result_after_response: dict) -> dict:
+    """Internal-only audit field (not part of the organizer's required
+    schema): isolates exactly what the G12 evidence-request/simulated-
+    response pass itself changed, separately from next_best_actions'
+    own initial/final (which also includes G11-D's reasoning-availability
+    delta, a different, earlier cause). `pre_evidence_actions` is
+    g2_result_final's own `recommended` -- the post-reasoning, PRE-
+    evidence-response G2 pass computed in investigate_and_assemble below
+    -- never the original pre-reasoning `g2_result` and never
+    next_best_actions["initial"]. `post_evidence_actions` is the SAME
+    g2_result the evidence loop actually produced
+    (evidence_outcome["g2_result"]). `added_by_evidence_response` is a
+    deterministic set-difference, ordered exactly as `post_evidence_
+    actions` already is (CANONICAL_ACTION_ORDER, via g2_policy.evaluate)
+    -- never re-sorted.
+    """
+    pre = _actions_from_g2_result(g2_result_final)
+    post = _actions_from_g2_result(g2_result_after_response)
+    pre_actions = {a["action"] for a in pre}
+    added = [a for a in post if a["action"] not in pre_actions]
+    return {
+        "pre_evidence_actions": pre,
+        "post_evidence_actions": post,
+        "added_by_evidence_response": added,
+    }
 
 
 def _historical_case_ids(cases: list, outcome: str = "confirmed_fraud") -> list[str]:
@@ -508,7 +560,12 @@ def _build_sar(ledger: dict, case: dict, validated: dict, next_best_actions_fina
     }
 
 
-def _stop_reason_for_success(ledger: dict, validated: dict, evidence_requested: bool) -> str:
+def _stop_reason_for_success(
+    ledger: dict,
+    validated: dict,
+    evidence_requested: bool,
+    evidence_request_outcome: dict | None = None,
+) -> str:
     """Organizer README, Answer Format top-level fields: `stop_reason` --
     "Why the investigation ended here." Built only from vocabulary this
     project already established (G1's own `recommendation` values and
@@ -517,13 +574,40 @@ def _stop_reason_for_success(ledger: dict, validated: dict, evidence_requested: 
     evidence-request loop's own honest signal (src.agent.evidence_loop)
     of whether it found a policy-relevant gap for this case -- never
     invented here.
+
+    `evidence_request_outcome` is G14's own record (see
+    _run_evidence_request_round) of whether an additional graph evidence
+    request was made. Bug fix: this parameter did not exist before, so a
+    case where G14's own second reasoning round ran and changed the
+    verdict still produced "No evidence-request gap existed" here --
+    factually wrong. Checked ONLY for round2_ok (a fully successful round
+    2): a rejected or failed request already left `validated` completely
+    unaffected by design, so it is correctly left unmentioned here too.
     """
-    loop_note = (
+    g14_completed = bool(evidence_request_outcome and evidence_request_outcome.get("round2_ok"))
+    g12_note = (
         "One evidence request was simulated and its assumed response applied to the final "
         "next-best-action recommendation (see evidence_requests)."
-        if evidence_requested
-        else "No evidence-request gap existed, so no further steps were taken."
     )
+    g14_note = (
+        f"An additional historical_case_evidence request for card "
+        f"{evidence_request_outcome['target_card_key']} was made and a second reasoning "
+        f"pass incorporated it before this verdict was reached."
+        if g14_completed
+        else ""
+    )
+    if evidence_requested and g14_completed:
+        # Both loops fired for this case (e.g. G14's own round 2 still
+        # left the verdict "uncertain" enough to also satisfy G12's R1
+        # gate) -- neither is more authoritative than the other, so both
+        # are stated rather than one silently overriding the other.
+        loop_note = f"{g12_note} {g14_note}"
+    elif evidence_requested:
+        loop_note = g12_note
+    elif g14_completed:
+        loop_note = g14_note
+    else:
+        loop_note = "No evidence-request gap existed, so no further steps were taken."
     return (
         f"G1 investigation completed (recommendation: {ledger.get('recommendation')}); "
         f"the reasoning layer produced a validated '{validated['verdict']}' verdict from the "
@@ -553,19 +637,134 @@ def assemble_case(ledger: dict, g2_result: dict, validated: dict) -> dict:
     }
 
 
+def _connected_via_device_card_keys(ledger: dict) -> set[str]:
+    """The exact, full (never sampled/trimmed) set the anti-fabrication
+    check validates a requested target_card_key against -- read from the
+    same full_evidence.combined_evidence.connected_cards.connected_via_device
+    path reasoning.py's own evidence_request_candidates is built from,
+    but here unbounded: a real card the LLM names correctly is never
+    rejected merely for falling outside the prompt's rendering cap.
+    """
+    combined = (ledger.get("full_evidence") or {}).get("combined_evidence") or {}
+    connected = combined.get("connected_cards") or {}
+    return {
+        c["card_key"]
+        for c in (connected.get("connected_via_device") or [])
+        if isinstance(c, dict) and c.get("card_key")
+    }
+
+
+def _ledger_with_additional_evidence(ledger: dict, target_card_key: str, q4_result: dict) -> dict:
+    """Shallow-copies the ledger and its full_evidence dict only, for
+    round 2's own build_evidence_package call -- never mutates the
+    caller's original ledger (g2_policy.evaluate, assemble_case, and
+    every other consumer of the original `ledger` argument see it
+    completely unchanged), and never overwrites the flagged card's own
+    combined_evidence.historical_cases. The new evidence lives only in
+    this new, clearly separated key.
+    """
+    full_evidence = dict(ledger.get("full_evidence") or {})
+    full_evidence["additional_evidence"] = {
+        "target_card_key": target_card_key,
+        "historical_case_evidence": q4_result,
+    }
+    enriched = dict(ledger)
+    enriched["full_evidence"] = full_evidence
+    return enriched
+
+
+async def _run_evidence_request_round(
+    ledger: dict, g2_result: dict, validated: dict, *, call_llm: CallLLM, call_tool: CallTool, timeout_s: float,
+) -> tuple[dict, dict | None]:
+    """G14: at most ONE additional evidence request, at most ONE
+    additional tool call, at most ONE additional LLM call -- returns
+    (final_validated, evidence_request_outcome). `final_validated` is
+    round 2's validated result on a fully successful round 2, or
+    `validated` (round 1's, unchanged) on any rejection or failure --
+    an optional enrichment can only ever improve on round 1's already-
+    valid result, never replace it with a failure. `evidence_request_
+    outcome` is None only when round 1 didn't ask for anything; every
+    other outcome (rejected, tool-failed, round-2-failed, or accepted)
+    is recorded, for auditability, never silently dropped.
+    """
+    if not validated.get("needs_more_evidence"):
+        return validated, None
+
+    request = validated.get("evidence_request") or {}
+    target_card_key = request.get("target_card_key")
+    reason = request.get("reason")
+    outcome: dict = {
+        "requested": True,
+        "type": request.get("type"),
+        "target_card_key": target_card_key,
+        "reason": reason,
+        "accepted": False,
+        "rejection_reason": None,
+        "round2_attempted": False,
+        "round2_ok": None,
+    }
+
+    # Anti-fabrication gate: reasoning_validator.py already rejected any
+    # `type` other than historical_case_evidence outright (the whole
+    # round-1 response fails validation in that case, so this function is
+    # never reached) -- the ONE thing left to check here, because it
+    # needs the ledger, is whether target_card_key names a card this
+    # investigation's own graph evidence actually surfaced.
+    if target_card_key not in _connected_via_device_card_keys(ledger):
+        outcome["rejection_reason"] = "target_card_key_not_in_connected_via_device"
+        return validated, outcome
+
+    tool_name = _EVIDENCE_TYPE_TOOL_NAMES[request["type"]]
+    ok, q4_result, err = await call_tool(tool_name, {"card_key": target_card_key})
+    if not ok:
+        outcome["accepted"] = True
+        outcome["rejection_reason"] = None
+        outcome["tool_error"] = scrub_secret(err or "")
+        return validated, outcome
+
+    outcome["accepted"] = True
+    enriched_ledger = _ledger_with_additional_evidence(ledger, target_card_key, q4_result)
+    round2_evidence_package = build_evidence_package(enriched_ledger, g2_result)
+
+    round2_outcome = await get_llm_reasoning(round2_evidence_package, call_llm=call_llm, timeout_s=timeout_s)
+    outcome["round2_attempted"] = True
+    if not round2_outcome["ok"]:
+        outcome["round2_ok"] = False
+        outcome["round2_failure_reason"] = round2_outcome["failure_reason"]
+        return validated, outcome
+
+    round2_validated = validate_reasoning_output(round2_outcome["raw"], round2_evidence_package)
+    if not round2_validated["ok"]:
+        outcome["round2_ok"] = False
+        outcome["round2_failure_reason"] = round2_validated["failure_reason"]
+        return validated, outcome
+
+    outcome["round2_ok"] = True
+    return round2_validated, outcome
+
+
 async def investigate_and_assemble(
     ledger: dict, g2_result: dict, *, call_llm: CallLLM | None = None, timeout_s: float = DEFAULT_LLM_TIMEOUT_S,
+    call_tool: CallTool | None = None,
 ) -> dict:
     """Top-level orchestration for this phase: runs the LLM reasoning
     layer over the already-completed G1/G2 results, validates its
-    output, and assembles the final case object. Makes zero MCP/
-    TigerGraph calls itself -- call_llm is the only external call this
-    function, or anything it calls, can make, and it is bounded by
-    timeout_s (see reasoning.get_llm_reasoning) so a non-responding
-    provider cannot hang this call indefinitely. On any failure (LLM call
+    output, and assembles the final case object. On any failure (LLM call
     failure, timeout, invalid JSON, failed validation), returns an
     explicit {"ok": False, ...} stop-state -- never a fabricated case
     object.
+
+    G14: makes zero MCP/TigerGraph calls itself UNLESS round 1's
+    validated output sets needs_more_evidence=true AND `call_tool` is
+    given -- then, and only then, at most ONE additional call
+    (src.agent.workflow's own historical_case_evidence tool, never a
+    tool name the LLM chose) may run, followed by at most ONE additional
+    LLM call. `call_tool` defaults to None: every existing caller that
+    doesn't pass it (every test written before this phase, and any
+    caller that doesn't wire it) gets the exact original zero-MCP-call,
+    single-LLM-call behavior, unconditionally -- this is not merely the
+    common case, it is the ONLY reachable path when call_tool is None,
+    regardless of what the LLM's own output says.
     """
     evidence_package = build_evidence_package(ledger, g2_result)
 
@@ -593,30 +792,63 @@ async def investigate_and_assemble(
             ),
         }
 
+    # G14: at most one additional evidence request/tool call/LLM call --
+    # see _run_evidence_request_round's own docstring. A no-op (returns
+    # `validated` unchanged, outcome=None) whenever call_tool is None or
+    # round 1 didn't ask for anything.
+    if call_tool is not None:
+        final_validated, evidence_request_outcome = await _run_evidence_request_round(
+            ledger, g2_result, validated, call_llm=call_llm, call_tool=call_tool, timeout_s=timeout_s,
+        )
+    else:
+        final_validated, evidence_request_outcome = validated, None
+
     # G11-D: the post-reasoning ("final") G2 pass -- called ONLY here,
     # after both the LLM call and validation have succeeded, using the
     # SAME g2_policy.evaluate() the pre-reasoning g2_result above already
-    # came from, now additionally given the validated reasoning output.
-    # On any failure path above, this line is never reached -- there is
-    # no other call to g2_policy.evaluate with a second argument anywhere
-    # in this module.
-    g2_result_final = g2_policy.evaluate(ledger, validated)
+    # came from, now additionally given the validated reasoning output
+    # (round 2's, if G14's one optional additional round ran and
+    # succeeded; round 1's unchanged otherwise). On any failure path
+    # above, this line is never reached -- there is no other call to
+    # g2_policy.evaluate with a second argument anywhere in this module.
+    g2_result_final = g2_policy.evaluate(ledger, final_validated)
 
     # G12: evidence-request / simulated-response loop -- runs only after
     # both the LLM call and validation succeeded, over the SAME
     # post-reasoning G2 pass just computed above. Adds no graph/LLM call
     # of its own; see src.agent.evidence_loop.apply.
-    evidence_outcome = evidence_loop.apply(ledger, validated, g2_result_final)
+    evidence_outcome = evidence_loop.apply(ledger, final_validated, g2_result_final)
 
-    case = assemble_case(ledger, g2_result, validated)
+    case = assemble_case(ledger, g2_result, final_validated)
     next_best_actions = _next_best_actions(g2_result, evidence_outcome["g2_result"])
+
+    # Internal-only audit field (not part of the organizer's 9-key
+    # submission schema): isolates what the evidence-request/simulated-
+    # response pass itself changed, separate from next_best_actions'
+    # own initial/final. Present only when an evidence request actually
+    # happened; None otherwise -- every other field above is unaffected
+    # either way.
+    evidence_delta = (
+        _evidence_delta(g2_result_final, evidence_outcome["g2_result"])
+        if evidence_outcome["evidence_requests"]
+        else None
+    )
 
     return {
         "ok": True,
         "case": case,
         "evidence_requests": evidence_outcome["evidence_requests"],
         "next_best_actions": next_best_actions,
-        "sar": _build_sar(ledger, case, validated, next_best_actions["final"]),
-        "stripped_ids": validated.get("stripped_ids", []),
-        "stop_reason": _stop_reason_for_success(ledger, validated, bool(evidence_outcome["evidence_requests"])),
+        "sar": _build_sar(ledger, case, final_validated, next_best_actions["final"]),
+        "stripped_ids": final_validated.get("stripped_ids", []),
+        "stop_reason": _stop_reason_for_success(
+            ledger, final_validated, bool(evidence_outcome["evidence_requests"]), evidence_request_outcome,
+        ),
+        "evidence_delta": evidence_delta,
+        # G14: internal-only audit field (not part of the organizer's
+        # 9-key submission schema, same discipline as evidence_delta) --
+        # None when round 1 never asked for more evidence; a full record
+        # (requested/accepted/rejection_reason/round2_ok/...) otherwise,
+        # so a rejected or failed request is never silently invisible.
+        "evidence_request_outcome": evidence_request_outcome,
     }

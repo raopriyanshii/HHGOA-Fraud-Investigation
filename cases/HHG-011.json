@@ -3,19 +3,19 @@
   "case": {
     "status": "closed_fraud",
     "verdict": "fraud",
-    "fraud_probability": 0.92,
+    "fraud_probability": 0.97,
     "pattern": "card_testing",
     "pattern_description": "",
     "affected_txn_ids": [
       "3583348",
       "3583368",
       "3583406",
-      "3583670"
+      "3583411"
     ],
     "first_suspicious_txn_id": "3583348",
     "connected_card_ids": [],
     "connected_device_profiles": [],
-    "exposure_usd": 412.74,
+    "exposure_usd": 191.75,
     "evidence": [
       {
         "claim": "R5 card-testing shape detected: three or more small online authorizations within an hour, followed by a strictly larger purchase (see candidates for exact windows)",
@@ -2544,18 +2544,18 @@
       }
     ],
     "similar_prior_cases": [
-      "CC-4501",
-      "CC-1056",
-      "CC-2247",
+      "CC-3905",
       "CC-2673",
       "CC-2799",
       "CC-0290",
-      "CC-3039",
-      "CC-3905",
       "CC-3206",
-      "CC-0031"
+      "CC-0031",
+      "CC-4501",
+      "CC-1056",
+      "CC-2247",
+      "CC-3039"
     ],
-    "summary": "The flagged transaction is part of a card\u2011testing pattern: three small authorizations within an hour followed by a larger purchase, with multiple independent confirmations of fraud on the card and related cards. The evidence shows the sequence 3583348\u21923583368\u21923583406 culminating in the larger purchase 3583670, and the historical record contains several similar confirmed\u2011fraud cases.",
+    "summary": "Transaction 3583368 is part of a card testing pattern involving three small authorizations followed by a larger purchase, and deterministic evidence confirms direct fraud for this card.",
     "written_to_graph": true,
     "graph_case_id": "HHG-011"
   },
@@ -2602,7 +2602,7 @@
       {
         "action": "BLOCK_CARD",
         "route": "L1",
-        "reason": "R5: a $131.3 purchase has already cleared (over $100); exposure $412.74 sets the L1/L2 route"
+        "reason": "R5: a $131.3 purchase has already cleared (over $100); exposure $191.75 sets the L1/L2 route"
       },
       {
         "action": "CREATE_CASE",
@@ -2620,7 +2620,7 @@
   "sar": {
     "file": true,
     "reason": "R6: shared device profile 'SM-G610F Build/NRD90M|UNKNOWN|chrome 66.0 for android|UNKNOWN' and billing region shows independently confirmed fraud on another card",
-    "narrative": "This report concerns customer C11923, card C11923:21363. The investigation's reasoning layer reached a 'fraud' verdict with a fraud probability of 0.92. 4 transaction(s) were identified as part of this episode, totaling $412.74. The identified pattern is card_testing. The earliest transaction identified as part of this episode is 3583348. The activity occurred on 2016-12-29. The pattern matches card testing: several small online authorizations preceded a strictly larger purchase on the same card. R6: shared device profile 'SM-G610F Build/NRD90M|UNKNOWN|chrome 66.0 for android|UNKNOWN' and billing region shows independently confirmed fraud on another card. 312 other card(s) sharing this element already show confirmed fraud: C00018:15017, C00071:20969, C00073:17304, C00259:15620, C00294:11260, and others. This activity resembles 10 previously closed fraud case(s): CC-4501, CC-1056, CC-2247, CC-2673, CC-2799, and others. The flagged transaction is part of a card\u2011testing pattern: three small authorizations within an hour followed by a larger purchase, with multiple independent confirmations of fraud on the card and related cards. The evidence shows the sequence 3583348\u21923583368\u21923583406 culminating in the larger purchase 3583670, and the historical record contains several similar confirmed\u2011fraud cases.",
+    "narrative": "This report concerns customer C11923, card C11923:21363. The investigation's reasoning layer reached a 'fraud' verdict with a fraud probability of 0.97. 4 transaction(s) were identified as part of this episode, totaling $191.75. The identified pattern is card_testing. The earliest transaction identified as part of this episode is 3583348. The activity occurred on 2016-12-29. The pattern matches card testing: several small online authorizations preceded a strictly larger purchase on the same card. R6: shared device profile 'SM-G610F Build/NRD90M|UNKNOWN|chrome 66.0 for android|UNKNOWN' and billing region shows independently confirmed fraud on another card. 312 other card(s) sharing this element already show confirmed fraud: C00018:15017, C00071:20969, C00073:17304, C00259:15620, C00294:11260, and others. This activity resembles 10 previously closed fraud case(s): CC-3905, CC-2673, CC-2799, CC-0290, CC-3206, and others. Transaction 3583368 is part of a card testing pattern involving three small authorizations followed by a larger purchase, and deterministic evidence confirms direct fraud for this card.",
     "subjects": [
       "C11923",
       "C11923:21363",
@@ -2631,7 +2631,7 @@
       "C00259:15620",
       "C00294:11260"
     ],
-    "total_amount_usd": 412.74,
+    "total_amount_usd": 191.75,
     "activity_dates": [
       "2016-12-29",
       "2016-12-29"
@@ -2640,5 +2640,5 @@
   "stop_reason": "G1 investigation completed (recommendation: escalate); the reasoning layer produced a validated 'fraud' verdict from the evidence gathered. No evidence-request gap existed, so no further steps were taken.",
   "tool_calls": 4,
   "tokens": 0,
-  "latency_s": 16.142
+  "latency_s": 12.634
 }

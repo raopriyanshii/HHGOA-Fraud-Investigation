@@ -39,6 +39,16 @@ type EvidenceRequestEntry = {
   assumed_response?: string;
 };
 
+// Development-dashboard-only field (see api/main.py) -- not part of the
+// organizer's submission schema, never present in cases/*.json. Present
+// (non-null) only for a case that actually triggered an evidence
+// request via the backend's evidence-request/simulated-response loop.
+type EvidenceDelta = {
+  pre_evidence_actions?: ActionEntry[];
+  post_evidence_actions?: ActionEntry[];
+  added_by_evidence_response?: ActionEntry[];
+} | null;
+
 type SarInfo = {
   file?: boolean;
   reason?: string;
@@ -79,6 +89,7 @@ type InvestigationResult = {
   tool_calls?: number;
   tokens?: number;
   latency_s?: number;
+  evidence_delta?: EvidenceDelta;
 };
 
 const STATUS_BADGE_STYLE: Record<string, string> = {
@@ -150,6 +161,11 @@ export default function Home() {
   const nba = result?.next_best_actions;
   const evidenceRequests = result?.evidence_requests ?? [];
   const evidenceEntries = caseInfo?.evidence ?? [];
+  // Development-dashboard-only field (see api/main.py) -- present only
+  // for a case that actually triggered an evidence request; never part
+  // of the organizer submission schema, never written to cases/*.json.
+  const evidenceDelta = result?.evidence_delta;
+  const firstEvidenceRequest = evidenceRequests[0];
 
   // Grounded only in what the response actually says: the backend's own
   // stop_reason text always starts with "G1 investigation completed"
@@ -441,6 +457,53 @@ export default function Home() {
                       {nba?.what_changed || "nothing"}
                     </p>
                   </div>
+
+                  {evidenceDelta && (
+                    <div className="space-y-3 rounded-lg border border-amber-500/20 bg-amber-500/5 p-4">
+                      <div className="text-xs uppercase tracking-wider text-amber-400">
+                        Evidence Impact
+                      </div>
+
+                      <ActionList
+                        label="Before evidence"
+                        actions={evidenceDelta.pre_evidence_actions ?? []}
+                      />
+
+                      <div className="rounded-lg border border-white/8 bg-[#0b0e13] p-3">
+                        <div className="text-xs uppercase tracking-wider text-zinc-500">
+                          New evidence
+                        </div>
+                        {firstEvidenceRequest ? (
+                          <>
+                            <div className="mt-2">
+                              <span className="text-xs font-medium text-zinc-300">
+                                {firstEvidenceRequest.type ?? "unknown"}
+                              </span>
+                            </div>
+                            <p className="mt-1 text-[11px] leading-5 text-zinc-500">
+                              {firstEvidenceRequest.assumed_response ?? ""}
+                            </p>
+                          </>
+                        ) : (
+                          <div className="mt-2 text-sm text-zinc-600">
+                            No evidence request recorded.
+                          </div>
+                        )}
+                      </div>
+
+                      <ActionList
+                        label="After evidence"
+                        actions={evidenceDelta.post_evidence_actions ?? []}
+                        highlight
+                      />
+
+                      <ActionList
+                        label="Added by evidence response"
+                        actions={evidenceDelta.added_by_evidence_response ?? []}
+                        highlight
+                      />
+                    </div>
+                  )}
                 </div>
               )}
             </Panel>

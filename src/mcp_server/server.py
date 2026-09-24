@@ -91,6 +91,16 @@ def cross_card_fraud_verification(card_key: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+def prior_investigation_memory(card_key: str, case_id: str) -> list[dict]:
+    """Q10: this system's own previously written HHG_InvestigationCase
+    records for the given card (excluding case_id itself and any
+    unwritten seed row). Registered for unit-testability only -- not
+    called by src.agent.workflow, and does not change the 5-tool-call
+    investigation budget."""
+    return _safe_call(q.q10_prior_investigation_memory, card_key, case_id)
+
+
+@mcp.tool()
 def write_case_memory(
     case_id: str,
     verdict: str,

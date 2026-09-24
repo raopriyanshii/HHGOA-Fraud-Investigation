@@ -5,7 +5,7 @@
     "verdict": "uncertain",
     "fraud_probability": 0.3,
     "pattern": "undocumented",
-    "pattern_description": "The available evidence does not fit any established fraud pattern. The activity shows a cluster of online transactions on a device that has been used by many other cards, but no definitive sign of card testing, account takeover, or region-based abuse. As such, it remains an undocumented pattern.",
+    "pattern_description": "The transaction does not match any of the predefined fraud patterns. It involves an online purchase with a card that has a moderate number of prior transactions, but no evidence of card-not-present fraud, account takeover, or region-based abuse. The device is associated with many different cards, which may indicate testing but is not sufficient to classify under the known patterns.",
     "affected_txn_ids": [
       "3450436",
       "3450503",
@@ -17,7 +17,7 @@
     "exposure_usd": 300.14,
     "evidence": [],
     "similar_prior_cases": [],
-    "summary": "Three online purchases by the same customer on the same device, device used by many other cards, no prior fraud case, pattern evidence not matched, moderate risk score. Verdict is uncertain pending further investigation.",
+    "summary": "Three online transactions from the same device and card, with no clear pattern evidence; overall evidence is insufficient to confirm fraud.",
     "written_to_graph": true,
     "graph_case_id": "HHG-017"
   },
@@ -60,5 +60,5 @@
   "stop_reason": "G1 investigation completed (recommendation: insufficient_evidence); the reasoning layer produced a validated 'uncertain' verdict from the evidence gathered. One evidence request was simulated and its assumed response applied to the final next-best-action recommendation (see evidence_requests).",
   "tool_calls": 3,
   "tokens": 0,
-  "latency_s": 7.226
+  "latency_s": 7.062
 }

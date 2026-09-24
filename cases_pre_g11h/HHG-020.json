@@ -16,22 +16,12 @@
     "connected_card_ids": [],
     "connected_device_profiles": [],
     "exposure_usd": 450.9,
-    "evidence": [
-      {
-        "claim": "G1 escalation basis: the customer's own historical case record includes at least one confirmed-fraud case",
-        "source": "graph",
-        "ref": "g1:recommendation_basis",
-        "entity_ids": [
-          "CC-2277",
-          "CC-2447"
-        ]
-      }
-    ],
+    "evidence": [],
     "similar_prior_cases": [
       "CC-2447",
       "CC-2277"
     ],
-    "summary": "Customer C12265 has a history of confirmed fraud (two prior account takeover cases). The current online transaction matches the same customer and device profile, supporting escalation.",
+    "summary": "The flagged transaction is linked to a customer with a history of confirmed account takeover fraud. The device shows multiple cards and several transactions on the same day, consistent with the prior fraud pattern.",
     "written_to_graph": true,
     "graph_case_id": "HHG-020"
   },
@@ -55,8 +45,8 @@
     "total_amount_usd": 0,
     "activity_dates": []
   },
-  "stop_reason": "G1 investigation completed (recommendation: escalate); the reasoning layer produced a validated 'fraud' verdict from the evidence gathered. No evidence-request gap existed, so no further steps were taken.",
+  "stop_reason": "G1 investigation completed (recommendation: escalate); the reasoning layer produced a validated 'fraud' verdict from the evidence gathered. No evidence-request loop exists in this phase, so no further steps were taken.",
   "tool_calls": 3,
   "tokens": 0,
-  "latency_s": 4.731
+  "latency_s": 5.035
 }

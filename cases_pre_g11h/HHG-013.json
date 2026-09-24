@@ -1,0 +1,74 @@
+{
+  "case_id": "HHG-013",
+  "case": {
+    "status": "closed_fraud",
+    "verdict": "fraud",
+    "fraud_probability": 0.9,
+    "pattern": "none",
+    "pattern_description": "",
+    "affected_txn_ids": [
+      "3524194",
+      "3524237",
+      "3524600",
+      "3524626",
+      "3524788",
+      "3525205",
+      "3525559",
+      "3525584",
+      "3525753",
+      "3525762",
+      "3525902",
+      "3526234",
+      "3526249",
+      "3526265",
+      "3526538",
+      "3526677",
+      "3526747",
+      "3526826",
+      "3526999",
+      "3527288",
+      "3527851",
+      "3528696",
+      "3529131",
+      "3529473",
+      "3529623"
+    ],
+    "first_suspicious_txn_id": "3524194",
+    "connected_card_ids": [],
+    "connected_device_profiles": [],
+    "exposure_usd": 1860.71,
+    "evidence": [],
+    "similar_prior_cases": [
+      "CC-3216",
+      "CC-1475",
+      "CC-4294"
+    ],
+    "summary": "The transaction 3526826 is part of a known fraud episode involving customer C07671, who had a prior confirmed fraud case (CC-3216) in September. The device used for the transaction was shared by many distinct cards and customers, and the evidence shows direct confirmation of fraud, leading to an escalation recommendation.",
+    "written_to_graph": true,
+    "graph_case_id": "HHG-013"
+  },
+  "evidence_requests": [],
+  "next_best_actions": {
+    "initial": [],
+    "final": [
+      {
+        "action": "CREATE_CASE",
+        "route": "auto",
+        "reason": "\u00a73a: fraud probability 0.9 reaches the 0.30 case-opening threshold"
+      }
+    ],
+    "what_changed": "added CREATE_CASE once the validated reasoning output (verdict/fraud_probability/pattern/exposure_usd) was available"
+  },
+  "sar": {
+    "file": false,
+    "reason": "",
+    "narrative": "",
+    "subjects": [],
+    "total_amount_usd": 0,
+    "activity_dates": []
+  },
+  "stop_reason": "G1 investigation completed (recommendation: escalate); the reasoning layer produced a validated 'fraud' verdict from the evidence gathered. No evidence-request loop exists in this phase, so no further steps were taken.",
+  "tool_calls": 3,
+  "tokens": 0,
+  "latency_s": 6.486
+}

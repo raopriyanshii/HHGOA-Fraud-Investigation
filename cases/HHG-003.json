@@ -3,16 +3,28 @@
   "case": {
     "status": "closed_fraud",
     "verdict": "fraud",
-    "fraud_probability": 0.9,
-    "pattern": "undocumented",
-    "pattern_description": "The available evidence does not match any recognized fraud pattern (out_of_region_use, account_takeover, card_not_present_fraud, etc.). Therefore the pattern remains undocumented.",
+    "fraud_probability": 0.95,
+    "pattern": "out_of_region_use",
+    "pattern_description": "",
     "affected_txn_ids": [
-      "3530164"
+      "3527397",
+      "3527532",
+      "3528392",
+      "3528902",
+      "3529041",
+      "3529981",
+      "3530056",
+      "3530164",
+      "3531019",
+      "3531833",
+      "3532138",
+      "3532333",
+      "3532926"
     ],
-    "first_suspicious_txn_id": "3530164",
+    "first_suspicious_txn_id": "3527397",
     "connected_card_ids": [],
     "connected_device_profiles": [],
-    "exposure_usd": 49,
+    "exposure_usd": 1121.85,
     "evidence": [
       {
         "claim": "G1 escalation basis: the customer's own historical case record includes at least one confirmed-fraud case",
@@ -30,11 +42,11 @@
     "similar_prior_cases": [
       "CC-3327",
       "CC-2817",
-      "CC-3682",
       "CC-2935",
+      "CC-3682",
       "CC-4957"
     ],
-    "summary": "Transaction 3530164 is flagged as direct_confirmed_fraud by deterministic findings, and the customer has a history of confirmed fraud cases. Thus the episode is considered fraudulent.",
+    "summary": "Transaction 3530164 on card C08623:19739 is part of a series of confirmed out_of_region_use frauds on this card, consistent with previous cases, warranting escalation.",
     "written_to_graph": true,
     "graph_case_id": "HHG-003"
   },
@@ -67,5 +79,5 @@
   "stop_reason": "G1 investigation completed (recommendation: escalate); the reasoning layer produced a validated 'fraud' verdict from the evidence gathered. No evidence-request gap existed, so no further steps were taken.",
   "tool_calls": 3,
   "tokens": 0,
-  "latency_s": 4.902
+  "latency_s": 5.647
 }

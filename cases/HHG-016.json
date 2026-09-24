@@ -3,19 +3,19 @@
   "case": {
     "status": "open",
     "verdict": "uncertain",
-    "fraud_probability": 0.45,
-    "pattern": "undocumented",
-    "pattern_description": "No established fraud pattern matches the evidence; the activity shows extensive card sharing on a single device without clear indicators of fraud.",
+    "fraud_probability": 0.4,
+    "pattern": "none",
+    "pattern_description": "",
     "affected_txn_ids": [
       "3534820"
     ],
-    "first_suspicious_txn_id": "3534820",
+    "first_suspicious_txn_id": "",
     "connected_card_ids": [],
     "connected_device_profiles": [],
     "exposure_usd": 59.67,
     "evidence": [],
     "similar_prior_cases": [],
-    "summary": "Transaction 3534820 was processed online using a Visa debit card from a device that has been used with many distinct cards. No direct fraud signals were detected, and the deterministic layer deemed evidence insufficient.",
+    "summary": "The transaction was made with the customer\u2019s own card, but the device used is linked to many cards that have a history of confirmed fraud. Policy recommends creating a case, yet no direct evidence of fraud exists for this particular transaction.",
     "written_to_graph": true,
     "graph_case_id": "HHG-016"
   },
@@ -61,8 +61,8 @@
     "total_amount_usd": 0,
     "activity_dates": []
   },
-  "stop_reason": "G1 investigation completed (recommendation: insufficient_evidence); the reasoning layer produced a validated 'uncertain' verdict from the evidence gathered. One evidence request was simulated and its assumed response applied to the final next-best-action recommendation (see evidence_requests).",
-  "tool_calls": 3,
+  "stop_reason": "G1 investigation completed (recommendation: insufficient_evidence); the reasoning layer produced a validated 'uncertain' verdict from the evidence gathered. One evidence request was simulated and its assumed response applied to the final next-best-action recommendation (see evidence_requests). An additional historical_case_evidence request for card C00294:11260 was made and a second reasoning pass incorporated it before this verdict was reached.",
+  "tool_calls": 4,
   "tokens": 0,
-  "latency_s": 10.682
+  "latency_s": 8.574
 }

@@ -43,7 +43,7 @@ def _success_result(case_id="HHG-999", *, file_report=False, written_to_graph=Tr
             ],
         },
         "g2_policy": {"recommended": final_actions, "prohibited": [], "deferred": []},
-        "llm": {"raw_response": "{...}", "call_error": None},
+        "llm": {"raw_responses": ["{...}"], "call_error": None},
         "outcome": {
             "ok": True,
             "case": {
@@ -83,7 +83,7 @@ def _investigation_failure_result(case_id="HHG-998"):
         "trigger": {"type": "case_id", "value": case_id},
         "g1": {"recommendation": "escalate", "tool_calls": [{"order": 1, "tool": "benchmark_case_resolution", "arguments": {}, "success": True}]},
         "g2_policy": {"recommended": [], "prohibited": [], "deferred": []},
-        "llm": {"raw_response": None, "call_error": "503 UNAVAILABLE"},
+        "llm": {"raw_responses": [], "call_error": "503 UNAVAILABLE"},
         "outcome": {
             "ok": False,
             "failure_reason": "llm_call_failed",
@@ -248,6 +248,100 @@ def test_tool_calls_counts_g1_calls_plus_graph_write_attempt():
 
     failure_out = sa.build_submission_case(_investigation_failure_result())
     assert failure_out["tool_calls"] == 1  # 1 G1 tool call, graph write never attempted
+
+
+# --- G14 fix: tool_calls also counts an actually-attempted evidence-request call ---
+
+def _result_with_evidence_request_outcome(outcome_dict):
+    result = _success_result()
+    result["outcome"]["evidence_request_outcome"] = outcome_dict
+    return result
+
+
+# A. no evidence request -> existing count (unaffected)
+def test_tool_calls_unaffected_when_no_evidence_request_was_made():
+    result = _result_with_evidence_request_outcome(None)
+    out = sa.build_submission_case(result)
+    assert out["tool_calls"] == 3  # unchanged: 2 G1 calls + 1 graph write, same as the base fixture
+
+
+def test_tool_calls_unaffected_when_evidence_request_outcome_key_is_absent_entirely():
+    # the base _success_result() fixture doesn't set this key at all --
+    # confirms .get(...) defaults safely, matching every pre-G14 result.
+    out = sa.build_submission_case(_success_result())
+    assert out["tool_calls"] == 3
+
+
+# B. invalid target / rejected request -> no additional count
+def test_tool_calls_unaffected_when_target_card_key_was_rejected():
+    result = _result_with_evidence_request_outcome({
+        "requested": True, "type": "historical_case_evidence", "target_card_key": "C_NOT_REAL:9",
+        "reason": "x", "accepted": False, "rejection_reason": "target_card_key_not_in_connected_via_device",
+        "round2_attempted": False, "round2_ok": None,
+    })
+    out = sa.build_submission_case(result)
+    assert out["tool_calls"] == 3  # NOT 4 -- the tool was never actually called
+
+
+def test_tool_calls_unaffected_when_needs_more_evidence_true_but_not_yet_accepted():
+    # defensive: an outcome dict that is present but has accepted=False
+    # (or missing the key) for any reason must never add 1 merely because
+    # a request existed.
+    result = _result_with_evidence_request_outcome({
+        "requested": True, "type": "historical_case_evidence", "target_card_key": "C1:1", "reason": "x",
+        "rejection_reason": None, "round2_attempted": False, "round2_ok": None,
+        # "accepted" deliberately absent
+    })
+    out = sa.build_submission_case(result)
+    assert out["tool_calls"] == 3
+
+
+# C. valid, accepted evidence request -> exactly +1
+def test_tool_calls_adds_exactly_one_for_an_accepted_evidence_request():
+    result = _result_with_evidence_request_outcome({
+        "requested": True, "type": "historical_case_evidence", "target_card_key": "C99999:1",
+        "reason": "x", "accepted": True, "rejection_reason": None,
+        "round2_attempted": True, "round2_ok": True,
+    })
+    out = sa.build_submission_case(result)
+    assert out["tool_calls"] == 4  # 2 G1 + 1 graph write + 1 accepted evidence-request call
+
+
+def test_tool_calls_adds_exactly_one_even_when_round2_itself_later_failed():
+    # accepted=True means the tool call was genuinely made -- whether
+    # round 2's subsequent LLM call then failed is a separate question
+    # and must not change whether the tool call itself is counted.
+    result = _result_with_evidence_request_outcome({
+        "requested": True, "type": "historical_case_evidence", "target_card_key": "C99999:1",
+        "reason": "x", "accepted": True, "rejection_reason": None,
+        "round2_attempted": True, "round2_ok": False, "round2_failure_reason": "llm_timeout",
+    })
+    out = sa.build_submission_case(result)
+    assert out["tool_calls"] == 4
+
+
+def test_tool_calls_adds_exactly_one_not_two_for_a_single_accepted_request():
+    result = _result_with_evidence_request_outcome({
+        "requested": True, "type": "historical_case_evidence", "target_card_key": "C99999:1",
+        "reason": "x", "accepted": True, "rejection_reason": None,
+        "round2_attempted": True, "round2_ok": True,
+    })
+    out = sa.build_submission_case(result)
+    assert out["tool_calls"] == out["tool_calls"]  # sanity
+    base = sa.build_submission_case(_success_result())["tool_calls"]
+    assert out["tool_calls"] == base + 1  # exactly +1, never more
+
+
+# D. organizer output still has exactly 9 keys
+def test_organizer_output_still_exactly_9_keys_with_evidence_request_outcome_present():
+    result = _result_with_evidence_request_outcome({
+        "requested": True, "type": "historical_case_evidence", "target_card_key": "C99999:1",
+        "reason": "x", "accepted": True, "rejection_reason": None,
+        "round2_attempted": True, "round2_ok": True,
+    })
+    out = sa.build_submission_case(result)
+    assert set(out.keys()) == _TOP_LEVEL_KEYS
+    assert "evidence_request_outcome" not in out
 
 
 # 12. tokens mapping

@@ -94,8 +94,21 @@ def _case_from_success(case: dict, written_to_graph: bool, graph_case_id: str) -
 def _tool_calls_count(result: dict) -> int:
     g1_tool_calls = (result.get("g1") or {}).get("tool_calls") or []
     graph_write = result.get("graph_write") or {}
+    # G14 fix: the one additional historical_case_evidence (Q4) call an
+    # accepted evidence request makes (see case_output._run_evidence_
+    # request_round) never touches ledger["tool_calls"] (it runs on a
+    # separate, enriched ledger copy case_output.py builds internally) --
+    # counted here from its own audit record instead. "accepted" is set
+    # True only once the anti-fabrication check has passed and
+    # call_tool(...) has actually been invoked -- never merely because
+    # needs_more_evidence is true, never for a rejected/invalid target
+    # card, and never for a request that failed reasoning_validator's own
+    # structural check before ever reaching case_output.py.
+    evidence_request_outcome = (result.get("outcome") or {}).get("evidence_request_outcome") or {}
     n = len(g1_tool_calls)
     if graph_write.get("attempted"):
+        n += 1
+    if evidence_request_outcome.get("accepted"):
         n += 1
     return n
 

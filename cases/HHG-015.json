@@ -4,18 +4,15 @@
     "status": "closed_fraud",
     "verdict": "fraud",
     "fraud_probability": 0.9,
-    "pattern": "card_not_present_new_device",
+    "pattern": "card_not_present_fraud",
     "pattern_description": "",
     "affected_txn_ids": [
-      "3462385",
-      "3462387",
-      "3462404",
       "3464869"
     ],
-    "first_suspicious_txn_id": "3462385",
+    "first_suspicious_txn_id": "3464869",
     "connected_card_ids": [],
     "connected_device_profiles": [],
-    "exposure_usd": 2140.94,
+    "exposure_usd": 599.94,
     "evidence": [
       {
         "claim": "R6: shared non-hub device/region evidence shows independently confirmed fraud on another card",
@@ -2234,10 +2231,10 @@
       }
     ],
     "similar_prior_cases": [
-      "CC-3886",
-      "CC-0615"
+      "CC-0615",
+      "CC-3886"
     ],
-    "summary": "The transaction was flagged by the deterministic G1 module as a direct confirmed fraud; historical cases for this customer were also confirmed as card\u2011not\u2011present, new\u2011device fraud. Device evidence shows the customer\u2019s card and several other cards that have been independently confirmed as fraudulent, supporting the fraud verdict.",
+    "summary": "The transaction (3464869) is online, has a high risk score, and the card (C03042) has two prior confirmed fraud cases (CC-0615, CC-3886). Device evidence shows the card shares a desktop device with many cards that have confirmed fraud. Thus the transaction is likely fraudulent.",
     "written_to_graph": true,
     "graph_case_id": "HHG-015"
   },
@@ -2277,7 +2274,7 @@
   "sar": {
     "file": true,
     "reason": "R6: shared device profile 'Trident/7.0|Windows 8.1|ie 11.0 for desktop|1680x1050' shows independently confirmed fraud on another card",
-    "narrative": "This report concerns customer C03042, card C03042:15158. The investigation's reasoning layer reached a 'fraud' verdict with a fraud probability of 0.9. 4 transaction(s) were identified as part of this episode, totaling $2140.94. The identified pattern is card_not_present_new_device. The earliest transaction identified as part of this episode is 3462385. The activity occurred between 2016-11-16 and 2016-11-17. The flagged transaction is billed in region 327.0. R6: shared device profile 'Trident/7.0|Windows 8.1|ie 11.0 for desktop|1680x1050' shows independently confirmed fraud on another card. 336 other card(s) sharing this element already show confirmed fraud: C00197:16667, C00210:15228, C00329:13169, C00400:15548, C00450:17089, and others. This activity resembles 2 previously closed fraud case(s): CC-3886, CC-0615. The transaction was flagged by the deterministic G1 module as a direct confirmed fraud; historical cases for this customer were also confirmed as card\u2011not\u2011present, new\u2011device fraud. Device evidence shows the customer\u2019s card and several other cards that have been independently confirmed as fraudulent, supporting the fraud verdict.",
+    "narrative": "This report concerns customer C03042, card C03042:15158. The investigation's reasoning layer reached a 'fraud' verdict with a fraud probability of 0.9. 1 transaction(s) were identified as part of this episode, totaling $599.94. The identified pattern is card_not_present_fraud. The earliest transaction identified as part of this episode is 3464869. The activity occurred on 2016-11-17. The flagged transaction is billed in region 327.0. R6: shared device profile 'Trident/7.0|Windows 8.1|ie 11.0 for desktop|1680x1050' shows independently confirmed fraud on another card. 336 other card(s) sharing this element already show confirmed fraud: C00197:16667, C00210:15228, C00329:13169, C00400:15548, C00450:17089, and others. This activity resembles 2 previously closed fraud case(s): CC-0615, CC-3886. The transaction (3464869) is online, has a high risk score, and the card (C03042) has two prior confirmed fraud cases (CC-0615, CC-3886). Device evidence shows the card shares a desktop device with many cards that have confirmed fraud. Thus the transaction is likely fraudulent.",
     "subjects": [
       "C03042",
       "C03042:15158",
@@ -2288,14 +2285,14 @@
       "C00400:15548",
       "C00450:17089"
     ],
-    "total_amount_usd": 2140.94,
+    "total_amount_usd": 599.94,
     "activity_dates": [
-      "2016-11-16",
+      "2016-11-17",
       "2016-11-17"
     ]
   },
   "stop_reason": "G1 investigation completed (recommendation: escalate); the reasoning layer produced a validated 'fraud' verdict from the evidence gathered. No evidence-request gap existed, so no further steps were taken.",
   "tool_calls": 4,
   "tokens": 0,
-  "latency_s": 7.976
+  "latency_s": 7.727
 }

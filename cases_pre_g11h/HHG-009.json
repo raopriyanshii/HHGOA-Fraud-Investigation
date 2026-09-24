@@ -1,0 +1,52 @@
+{
+  "case_id": "HHG-009",
+  "case": {
+    "status": "open",
+    "verdict": "uncertain",
+    "fraud_probability": 0.2,
+    "pattern": "none",
+    "pattern_description": "",
+    "affected_txn_ids": [
+      "3581141"
+    ],
+    "first_suspicious_txn_id": "",
+    "connected_card_ids": [],
+    "connected_device_profiles": [],
+    "exposure_usd": 30.02,
+    "evidence": [],
+    "similar_prior_cases": [],
+    "summary": "Transaction 3581141 is an isolated online purchase with no prior fraud evidence. Deterministic findings indicate insufficient evidence for fraud.",
+    "written_to_graph": true,
+    "graph_case_id": "HHG-009"
+  },
+  "evidence_requests": [],
+  "next_best_actions": {
+    "initial": [
+      {
+        "action": "CREATE_CASE",
+        "route": "auto",
+        "reason": "\u00a73a: customer disputes a charge (trigger_type == 'customer_report')"
+      }
+    ],
+    "final": [
+      {
+        "action": "CREATE_CASE",
+        "route": "auto",
+        "reason": "\u00a73a: customer disputes a charge (trigger_type == 'customer_report')"
+      }
+    ],
+    "what_changed": "nothing"
+  },
+  "sar": {
+    "file": false,
+    "reason": "",
+    "narrative": "",
+    "subjects": [],
+    "total_amount_usd": 0,
+    "activity_dates": []
+  },
+  "stop_reason": "G1 investigation completed (recommendation: insufficient_evidence); the reasoning layer produced a validated 'uncertain' verdict from the evidence gathered. No evidence-request loop exists in this phase, so no further steps were taken.",
+  "tool_calls": 3,
+  "tokens": 0,
+  "latency_s": 3.516
+}

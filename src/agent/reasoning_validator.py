@@ -21,13 +21,19 @@ established, in either direction:
 """
 from __future__ import annotations
 
-from src.agent.reasoning import REQUIRED_OUTPUT_KEYS, VALID_PATTERNS, VALID_VERDICTS
+from src.agent.reasoning import (
+    REQUIRED_OUTPUT_KEYS,
+    VALID_EVIDENCE_REQUEST_TYPES,
+    VALID_PATTERNS,
+    VALID_VERDICTS,
+)
 
 # G8: imported from reasoning.py (the schema's single source of truth)
 # rather than redefined here -- same values as G7, this is a dedup only.
 _VALID_VERDICTS = VALID_VERDICTS
 _VALID_PATTERNS = VALID_PATTERNS
 _REQUIRED_KEYS = REQUIRED_OUTPUT_KEYS
+_VALID_EVIDENCE_REQUEST_TYPES = VALID_EVIDENCE_REQUEST_TYPES
 
 
 def _fail(reason: str, detail: str = "") -> dict:
@@ -115,6 +121,48 @@ def validate_reasoning_output(raw: object, evidence_package: dict) -> dict:
     if not isinstance(uncertainties, list) or not all(isinstance(u, str) for u in uncertainties):
         uncertainties = []  # advisory only, never load-bearing for acceptance
 
+    # G14: needs_more_evidence/evidence_request are deliberately NOT in
+    # _REQUIRED_KEYS -- every pre-G14 raw-response test fixture in this
+    # project predates this feature, and their absence here means
+    # "needs_more_evidence=False", never a malformed_output rejection.
+    # A real LLM response IS required (by REASONING_OUTPUT_SCHEMA's own
+    # "required" list) to include both, since strict structured-output
+    # mode demands every declared property be present.
+    #
+    # This function only checks STRUCTURAL validity (booleans/enum/non-
+    # empty strings) -- whether target_card_key actually names a real,
+    # already-retrieved connected_via_device card requires the ledger,
+    # which this function never receives; that graph-dependent check
+    # belongs in case_output.py (the orchestration layer), per this
+    # phase's own design.
+    needs_more_evidence = raw.get("needs_more_evidence", False)
+    if not isinstance(needs_more_evidence, bool):
+        return _fail("malformed_output", "needs_more_evidence must be a boolean")
+
+    raw_evidence_request = raw.get("evidence_request")
+    evidence_request: dict | None = None
+    if needs_more_evidence:
+        if not isinstance(raw_evidence_request, dict):
+            return _fail("invalid_evidence_request", "evidence_request must be an object when needs_more_evidence is true")
+        req_type = raw_evidence_request.get("type")
+        target_card_key = raw_evidence_request.get("target_card_key")
+        req_reason = raw_evidence_request.get("reason")
+        if req_type not in _VALID_EVIDENCE_REQUEST_TYPES:
+            return _fail("invalid_evidence_request", f"unsupported evidence_request.type: {req_type!r}")
+        if not isinstance(target_card_key, str) or not target_card_key.strip():
+            return _fail("invalid_evidence_request", "evidence_request.target_card_key must be a non-empty string")
+        if not isinstance(req_reason, str) or not req_reason.strip():
+            return _fail("invalid_evidence_request", "evidence_request.reason must be a non-empty string")
+        evidence_request = {"type": req_type, "target_card_key": target_card_key, "reason": req_reason}
+    else:
+        # Deterministic override, same discipline as pattern_description:
+        # needs_more_evidence=False is the LLM's own explicit signal that
+        # no more evidence is needed -- an inconsistent, populated
+        # evidence_request alongside it is corrected, not trusted, and
+        # never fails the whole response over one inconsistent nullable
+        # field.
+        evidence_request = None
+
     known_ids = evidence_package.get("known_ids") or {}
     known_txn_ids = set(known_ids.get("txn") or [])
     flagged_txn_id = evidence_package.get("flagged_txn_id")
@@ -194,4 +242,6 @@ def validate_reasoning_output(raw: object, evidence_package: dict) -> dict:
         "reasoning": reasoning_text,
         "uncertainties": uncertainties,
         "stripped_ids": stripped_ids,
+        "needs_more_evidence": needs_more_evidence,
+        "evidence_request": evidence_request,
     }

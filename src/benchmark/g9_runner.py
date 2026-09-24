@@ -99,6 +99,39 @@ _GRAPH_WRITE_NOT_ATTEMPTED = {
 }
 
 
+async def _real_evidence_request_call_tool(name: str, arguments: dict) -> tuple[bool, Any, str | None]:
+    """Real MCP dispatch for case_output.py's one optional G14 additional-
+    evidence-request call -- same (ok, value, error) contract and never-
+    raises guarantee as _real_write_call_tool below, deliberately kept as
+    a SEPARATE, similarly hard-scoped function (not a shared/parametrized
+    dispatcher) rather than generalized, so neither one can accidentally
+    become a general-purpose tool-name-agnostic dispatcher. Scoped ONLY
+    to historical_case_evidence: `name` is never constructed from data --
+    case_output.py's own fixed _EVIDENCE_TYPE_TOOL_NAMES registry is the
+    only source of the string passed here.
+    """
+    if name != "historical_case_evidence":
+        raise ValueError(f"tool {name!r} is not the G14 evidence-request tool this dispatcher is scoped to")
+    try:
+        result = await mcp.call_tool(name, arguments)
+    except Exception as e:
+        return False, None, scrub_secret(str(e))
+    if result.is_error:
+        text_parts = [getattr(c, "text", "") for c in (result.content or [])]
+        message = " ".join(p for p in text_parts if p) or f"{name} returned an error"
+        return False, None, scrub_secret(message)
+    sc = result.structured_content
+    if sc is not None:
+        value = sc.get("result") if isinstance(sc, dict) and "result" in sc else sc
+    else:
+        text_parts = [getattr(c, "text", "") for c in (result.content or [])]
+        try:
+            value = json.loads("".join(text_parts)) if text_parts else None
+        except json.JSONDecodeError:
+            value = None
+    return True, value, None
+
+
 async def _real_write_call_tool(name: str, arguments: dict) -> tuple[bool, Any, str | None]:
     """Real MCP dispatch for src.agent.case_writer's one write call --
     mirrors src.agent.workflow._default_call_tool's exact (ok, value,
@@ -138,11 +171,18 @@ def _make_recording_call_llm(call_llm: CallLLM) -> tuple[CallLLM, dict]:
     """Wraps a real CallLLM purely for audit capture. Forwards to
     `call_llm` unchanged, adds no additional call, no retry, and no
     timeout -- reasoning.get_llm_reasoning's own asyncio.wait_for
-    (DEFAULT_LLM_TIMEOUT_S) still governs the single call exactly as
-    before. `record` is populated with whatever this one call actually
-    returned or raised, for the case-result artifact only.
+    (DEFAULT_LLM_TIMEOUT_S) still governs each call exactly as before.
+    `record["raw_responses"]` is populated with every response this
+    wrapper actually returned, in call order -- one entry for a normal,
+    single-round case; two when case_output.py's G14 evidence-request
+    round runs (this same wrapped closure is reused for both rounds,
+    since it's the one `call_llm` passed into investigate_and_assemble).
+    G14 fix: previously a single `raw_response` key was overwritten on
+    each call, silently losing round 1's raw text whenever round 2 ran --
+    a real, disclosed shape change for this debug-only field, not part
+    of the organizer's 9-key schema.
     """
-    record: dict = {"raw_response": None, "call_error": None}
+    record: dict = {"raw_responses": [], "call_error": None}
 
     async def wrapped(prompt: str) -> str:
         try:
@@ -150,20 +190,25 @@ def _make_recording_call_llm(call_llm: CallLLM) -> tuple[CallLLM, dict]:
         except Exception as e:
             record["call_error"] = scrub_secret(str(e))
             raise
-        record["raw_response"] = result
+        record["raw_responses"].append(result)
         return result
 
     return wrapped, record
 
 
-async def run_single_case(case_id: str, call_llm: CallLLM, *, write_call_tool=None) -> dict:
+async def run_single_case(
+    case_id: str, call_llm: CallLLM, *, write_call_tool=None, evidence_request_call_tool=None,
+) -> dict:
     """Runs the existing, unmodified pipeline for one case_id trigger.
-    Exactly one LLM call is made if G1/G2 succeed (case_output.
-    investigate_and_assemble's own existing guarantee, unchanged here).
-    Raises on a genuine pipeline exception (G1/G2) -- the caller
-    (run_all_cases) is responsible for per-case exception isolation, so
-    this function itself stays a direct, unmodified reflection of the
-    real pipeline for anyone testing it in isolation.
+    At most two LLM calls are made if G1/G2 succeed and round 1's own
+    validated output requests additional evidence (case_output.
+    investigate_and_assemble's own G14 guarantee: one call unconditionally,
+    a second only on a validated, accepted evidence request) -- otherwise
+    exactly one, unchanged from before G14. Raises on a genuine pipeline
+    exception (G1/G2) -- the caller (run_all_cases) is responsible for
+    per-case exception isolation, so this function itself stays a direct,
+    unmodified reflection of the real pipeline for anyone testing it in
+    isolation.
 
     G10 integration (added here, the smallest point available): once
     `outcome` exists, if and ONLY if the investigation itself succeeded
@@ -177,9 +222,16 @@ async def run_single_case(case_id: str, call_llm: CallLLM, *, write_call_tool=No
     just structurally guaranteed one layer down). `write_call_tool`
     defaults to the real MCP dispatch (_real_write_call_tool); tests
     inject a fake to avoid any live TigerGraph/MCP dependency.
+
+    G14 integration: `evidence_request_call_tool` is threaded into
+    investigate_and_assemble's own `call_tool` parameter, the exact same
+    dependency-injection pattern as `write_call_tool` above -- defaults
+    to the real MCP dispatch (_real_evidence_request_call_tool); tests
+    inject a fake for the same reason.
     """
     recording_call_llm, record = _make_recording_call_llm(call_llm)
     write_call_tool = write_call_tool or _real_write_call_tool
+    evidence_request_call_tool = evidence_request_call_tool or _real_evidence_request_call_tool
 
     t0 = time.perf_counter()
     ledger = await wf.investigate({"type": "case_id", "value": case_id})
@@ -188,7 +240,9 @@ async def run_single_case(case_id: str, call_llm: CallLLM, *, write_call_tool=No
     g2_result = g2.evaluate(ledger)
 
     t2 = time.perf_counter()
-    outcome = await co.investigate_and_assemble(ledger, g2_result, call_llm=recording_call_llm)
+    outcome = await co.investigate_and_assemble(
+        ledger, g2_result, call_llm=recording_call_llm, call_tool=evidence_request_call_tool,
+    )
     t3 = time.perf_counter()
 
     if outcome.get("ok"):
@@ -223,7 +277,7 @@ async def run_single_case(case_id: str, call_llm: CallLLM, *, write_call_tool=No
         },
         "g2_policy": g2_result,
         "llm": {
-            "raw_response": record["raw_response"],
+            "raw_responses": record["raw_responses"],
             "call_error": record["call_error"],
         },
         "outcome": outcome,

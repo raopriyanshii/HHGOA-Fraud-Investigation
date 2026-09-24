@@ -328,3 +328,168 @@ def test_runner_exception_path_reports_written_to_graph_false(monkeypatch, tmp_p
     assert result["written_to_graph"] is False
     assert result["graph_case_id"] == ""
     assert write_call_tool.calls == []
+
+
+# --- G14 end-to-end integration through run_single_case (fake data only, no live calls) ---
+
+def _fake_ledger_with_connected_via_device(case_id: str, target_card_key: str, flagged_txn_id: int = 3530164) -> dict:
+    ledger = _fake_ledger(case_id, flagged_txn_id)
+    ledger["full_evidence"]["combined_evidence"]["connected_cards"] = {
+        "connected_via_case": [],
+        "connected_via_device": [{"card_key": target_card_key, "customer_id": target_card_key.split(":")[0]}],
+    }
+    return ledger
+
+
+def _evidence_request_llm_response(target_card_key: str) -> str:
+    return json.dumps({
+        "verdict": "uncertain", "fraud_probability": 0.4, "affected_txn_ids": [],
+        "first_suspicious_txn_id": None, "pattern": "none", "pattern_description": "",
+        "summary": "needs more evidence", "reasoning": "checking sibling card", "uncertainties": [],
+        "needs_more_evidence": True,
+        "evidence_request": {"type": "historical_case_evidence", "target_card_key": target_card_key, "reason": "check sibling history"},
+    })
+
+
+_G14_FINAL_LLM_RESPONSE = json.dumps({
+    "verdict": "fraud", "fraud_probability": 0.9, "affected_txn_ids": ["3530164"],
+    "first_suspicious_txn_id": "3530164", "pattern": "none", "pattern_description": "",
+    "summary": "confirmed after sibling check", "reasoning": "sibling had confirmed fraud", "uncertainties": [],
+})
+
+
+def _sequenced_call_llm(*responses):
+    calls = []
+
+    async def call_llm(prompt):
+        calls.append(prompt)
+        return responses[len(calls) - 1]
+
+    call_llm.calls = calls
+    return call_llm
+
+
+def _fake_evidence_request_call_tool(response=None, ok=True, error=None):
+    calls = []
+
+    async def call_tool(name, arguments):
+        calls.append((name, arguments))
+        if not ok:
+            return False, None, error or "simulated Q4 tool failure"
+        return True, response if response is not None else {"direct_cases": [{"case_id": "CC-1", "outcome": "confirmed_fraud"}], "connected_cases": []}, None
+
+    call_tool.calls = calls
+    return call_tool
+
+
+# 1. evidence requested successfully -> Q4 runs once, round 2 runs once, final result from round 2
+
+def test_g14_evidence_requested_successfully_full_g9_integration(monkeypatch):
+    target_card_key = "C99999:1"
+
+    async def fake_investigate_with_device(trigger, *, window_hours=24.0, call_tool=None):
+        return _fake_ledger_with_connected_via_device(trigger["value"], target_card_key)
+
+    monkeypatch.setattr(g9_runner.wf, "investigate", fake_investigate_with_device)
+
+    call_llm = _sequenced_call_llm(_evidence_request_llm_response(target_card_key), _G14_FINAL_LLM_RESPONSE)
+    write_call_tool = _fake_write_call_tool()
+    evidence_call_tool = _fake_evidence_request_call_tool()
+
+    result = run(g9_runner.run_single_case(
+        "HHG-003", call_llm, write_call_tool=write_call_tool, evidence_request_call_tool=evidence_call_tool,
+    ))
+
+    assert result["success"] is True
+    assert len(call_llm.calls) == 2  # LLM calls = 2 only because G14 succeeded
+    assert len(evidence_call_tool.calls) == 1  # Q4 called exactly once
+    assert evidence_call_tool.calls[0] == ("historical_case_evidence", {"card_key": target_card_key})
+    # both raw responses preserved, in chronological order:
+    assert result["llm"]["raw_responses"] == [_evidence_request_llm_response(target_card_key), _G14_FINAL_LLM_RESPONSE]
+    assert result["outcome"]["case"]["verdict"] == "fraud"  # round 2's result used, not round 1's
+
+    info = result["outcome"]["evidence_request_outcome"]
+    assert info["accepted"] is True
+    assert info["round2_attempted"] is True
+    assert info["round2_ok"] is True
+
+    from src.benchmark import submission_adapter as sa
+    submission = sa.build_submission_case(result)
+    assert set(submission.keys()) == {
+        "case_id", "case", "evidence_requests", "next_best_actions", "sar",
+        "stop_reason", "tool_calls", "tokens", "latency_s",
+    }
+    # tool_calls counted correctly: 1 fake G1 call + 1 graph write + 1 accepted evidence-request call
+    assert submission["tool_calls"] == 3
+
+
+# 2. invalid card requested -> Q4 NOT called, round 2 NOT called, round 1's result used
+
+def test_g14_invalid_card_requested_no_tool_call_no_round2(monkeypatch):
+    _patch_investigate(monkeypatch)  # default fake ledger's connected_via_device is []
+    call_llm = _sequenced_call_llm(_evidence_request_llm_response("C_NOT_REAL:1"))
+    write_call_tool = _fake_write_call_tool()
+    evidence_call_tool = _fake_evidence_request_call_tool()
+
+    result = run(g9_runner.run_single_case(
+        "HHG-003", call_llm, write_call_tool=write_call_tool, evidence_request_call_tool=evidence_call_tool,
+    ))
+
+    assert result["success"] is True
+    assert len(call_llm.calls) == 1  # no second LLM call
+    assert evidence_call_tool.calls == []  # Q4 never called
+    assert result["llm"]["raw_responses"] == [_evidence_request_llm_response("C_NOT_REAL:1")]
+    assert result["outcome"]["case"]["verdict"] == "uncertain"  # round 1's own result, unchanged
+
+    info = result["outcome"]["evidence_request_outcome"]
+    assert info["accepted"] is False
+    assert info["rejection_reason"] == "target_card_key_not_in_connected_via_device"
+
+    from src.benchmark import submission_adapter as sa
+    submission = sa.build_submission_case(result)
+    assert set(submission.keys()) == {
+        "case_id", "case", "evidence_requests", "next_best_actions", "sar",
+        "stop_reason", "tool_calls", "tokens", "latency_s",
+    }
+    assert submission["tool_calls"] == 2  # 1 G1 call + 1 graph write -- NOT +1 for the rejected request
+
+
+# 3. historical evidence tool fails -> round 2 NOT called, falls back to round 1
+
+def test_g14_historical_tool_failure_falls_back_to_round1(monkeypatch):
+    target_card_key = "C99999:1"
+
+    async def fake_investigate_with_device(trigger, *, window_hours=24.0, call_tool=None):
+        return _fake_ledger_with_connected_via_device(trigger["value"], target_card_key)
+
+    monkeypatch.setattr(g9_runner.wf, "investigate", fake_investigate_with_device)
+
+    call_llm = _sequenced_call_llm(_evidence_request_llm_response(target_card_key))
+    write_call_tool = _fake_write_call_tool()
+    evidence_call_tool = _fake_evidence_request_call_tool(ok=False, error="simulated Q4 tool failure")
+
+    result = run(g9_runner.run_single_case(
+        "HHG-003", call_llm, write_call_tool=write_call_tool, evidence_request_call_tool=evidence_call_tool,
+    ))
+
+    assert result["success"] is True
+    assert len(call_llm.calls) == 1  # round 2 never happened
+    assert len(evidence_call_tool.calls) == 1  # Q4 WAS attempted -- that's how the failure is known
+    assert result["llm"]["raw_responses"] == [_evidence_request_llm_response(target_card_key)]
+    assert result["outcome"]["case"]["verdict"] == "uncertain"  # safe fallback to round 1's result
+
+    info = result["outcome"]["evidence_request_outcome"]
+    assert info["accepted"] is True  # the call was genuinely attempted
+    assert info["round2_attempted"] is False  # never reached round 2 since the tool itself failed
+    assert "tool_error" in info
+
+    from src.benchmark import submission_adapter as sa
+    submission = sa.build_submission_case(result)
+    assert set(submission.keys()) == {
+        "case_id", "case", "evidence_requests", "next_best_actions", "sar",
+        "stop_reason", "tool_calls", "tokens", "latency_s",
+    }
+    # an attempted-but-failed tool call is still counted (matches the
+    # existing convention: G1's own tool_calls list counts attempted
+    # calls regardless of success/failure too):
+    assert submission["tool_calls"] == 3

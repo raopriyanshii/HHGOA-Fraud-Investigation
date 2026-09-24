@@ -77,7 +77,12 @@ async def health() -> dict:
 @app.post("/investigate")
 async def investigate(request: InvestigateRequest) -> dict:
     """Runs the existing investigation pipeline end-to-end for one case
-    and returns the organizer-shaped submission JSON. Performs a real
+    and returns the organizer-shaped submission JSON, plus one additive
+    `evidence_delta` field (see src.agent.case_output._evidence_delta)
+    for the development dashboard only -- present (non-null) only when
+    this case actually triggered an evidence request, present as
+    `null` otherwise, never part of build_submission_case's own return
+    value or of any file written to outputs/ or cases/. Performs a real
     Groq call and a real TigerGraph read + write, exactly as
     run_single_case already does when called directly -- this endpoint
     adds no retry, no caching, and no additional call of its own.
@@ -85,7 +90,15 @@ async def investigate(request: InvestigateRequest) -> dict:
     try:
         call_llm = _build_call_llm("groq")
         result = await run_single_case(request.case_id, call_llm)
-        return build_submission_case(result)
+        # Internal-only field for the development dashboard (see
+        # src.agent.case_output._evidence_delta) -- build_submission_case
+        # itself is never modified, so every real submission artifact
+        # (cases/<id>.json, written only by src.benchmark.g9_runner /
+        # submission_adapter.write_submission_file, never by this dev-only
+        # endpoint) is completely unaffected by this attribute.
+        submission = build_submission_case(result)
+        submission["evidence_delta"] = result.get("outcome", {}).get("evidence_delta")
+        return submission
     except Exception:
         # Never leak str(exception) to the client or the log -- the
         # backend's own providers already scrub secrets before raising,
