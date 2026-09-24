@@ -449,6 +449,98 @@ def test_block_all_cards_still_prohibited_even_with_qualifying_r6_evidence():
     assert not any(e["action"] == "BLOCK_ALL_CARDS" for e in result["recommended"])
 
 
+# --- G8 defect fix: _r6_evidence_present must read full_evidence
+# (untrimmed) at real HHG-011 scale (795 device + 197 region other_cards)
+# without crashing on workflow.py's _trim()-collapsed tool_calls copy. ---
+
+def _synthetic_other_cards_g2(total: int, fraud_positive_indices: set[int]) -> list[dict]:
+    return [
+        {
+            "card_key": f"C{i:05d}:1",
+            "customer_id": f"C{i:05d}",
+            "same_customer": False,
+            "has_confirmed_fraud": i in fraud_positive_indices,
+            "confirmed_fraud_case_ids": [f"CC-{i:04d}"] if i in fraud_positive_indices else [],
+        }
+        for i in range(total)
+    ]
+
+
+def test_r6_reads_full_evidence_at_hhg011_scale_without_crashing():
+    # 795 other_cards, matching workflow.py's _MAX_LIST_SAMPLE=5 trim
+    # threshold being far exceeded -- the trimmed tool_calls copy would be
+    # {"count": 795, "sample": [...]}, which crashed this function before
+    # the G8 fix (iterating a dict yields its keys as bare strings).
+    # fraud-positive card placed near the END, past any trimmed sample:
+    other_cards = _synthetic_other_cards_g2(795, fraud_positive_indices={790})
+    ledger = _base_ledger(
+        tool_calls=[{
+            "order": 2,
+            "tool": "cross_card_fraud_verification",
+            "arguments": {"card_key": "C12382:21139"},
+            "success": True,
+            # simulates workflow.py's real _trim() output for this size:
+            "curated_result_summary": {
+                "via_device": {"other_cards": {"count": 795, "sample": other_cards[:5]}},
+                "via_region": None,
+            },
+        }],
+        full_evidence={
+            "combined_evidence": {},
+            "cross_card_fraud_verification": {"via_device": {"other_cards": other_cards}, "via_region": None},
+        },
+    )
+    assert g2._r6_evidence_present(ledger) is True
+
+
+def test_r6_full_evidence_path_finds_fraud_card_beyond_any_trimmed_sample():
+    # the trimmed sample only ever has 5 entries -- if this function fell
+    # back to reading the trimmed copy, it would never see index 790.
+    other_cards = _synthetic_other_cards_g2(795, fraud_positive_indices={790})
+    ledger = _base_ledger(
+        tool_calls=[_q9_call(2, via_device={"other_cards": {"count": 795, "sample": other_cards[:5]}})],
+        full_evidence={
+            "combined_evidence": {},
+            "cross_card_fraud_verification": {"via_device": {"other_cards": other_cards}, "via_region": None},
+        },
+    )
+    assert g2._r6_evidence_present(ledger) is True
+
+
+def test_r6_full_evidence_path_correctly_absent_when_no_fraud_at_scale():
+    other_cards = _synthetic_other_cards_g2(795, fraud_positive_indices=set())  # zero fraud-positive
+    ledger = _base_ledger(
+        tool_calls=[_q9_call(2, via_device={"other_cards": {"count": 795, "sample": other_cards[:5]}})],
+        full_evidence={
+            "combined_evidence": {},
+            "cross_card_fraud_verification": {"via_device": {"other_cards": other_cards}, "via_region": None},
+        },
+    )
+    assert g2._r6_evidence_present(ledger) is False
+
+
+def test_r6_falls_back_to_tool_calls_path_when_full_evidence_absent():
+    # pre-G7 ledger shape (no full_evidence key at all) must still work
+    # unchanged -- this is the original, small-fixture behavior.
+    ledger = _base_ledger(tool_calls=[_q9_call(2, via_device=_QUALIFYING_VIA_DEVICE)])
+    assert "full_evidence" not in ledger
+    assert g2._r6_evidence_present(ledger) is True
+
+
+def test_r6_defensive_guard_against_non_dict_entries_in_full_evidence():
+    # defense-in-depth: even a still-malformed/trimmed-shaped entry inside
+    # full_evidence itself (should never happen, since full_evidence is
+    # never passed through _trim(), but guarded anyway) does not crash.
+    ledger = _base_ledger(
+        tool_calls=[_q9_call(2, via_device=_QUALIFYING_VIA_DEVICE)],
+        full_evidence={
+            "combined_evidence": {},
+            "cross_card_fraud_verification": {"via_device": {"other_cards": ["count", "sample"]}, "via_region": None},
+        },
+    )
+    assert g2._r6_evidence_present(ledger) is False
+
+
 def test_r6_evidence_present_ignores_connected_via_case_shaped_data():
     # Sanity check that HHG_CONNECTED_TO-derived evidence (which Q9 never
     # produces) cannot accidentally satisfy _r6_evidence_present even if a

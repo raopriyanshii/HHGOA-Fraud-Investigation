@@ -21,15 +21,13 @@ established, in either direction:
 """
 from __future__ import annotations
 
-_VALID_VERDICTS = ("fraud", "legitimate", "uncertain")
-_VALID_PATTERNS = (
-    "card_testing", "card_not_present_fraud", "card_not_present_new_device",
-    "out_of_region_use", "account_takeover", "undocumented", "none",
-)
-_REQUIRED_KEYS = (
-    "verdict", "fraud_probability", "affected_txn_ids", "first_suspicious_txn_id",
-    "pattern", "pattern_description", "summary", "reasoning", "uncertainties",
-)
+from src.agent.reasoning import REQUIRED_OUTPUT_KEYS, VALID_PATTERNS, VALID_VERDICTS
+
+# G8: imported from reasoning.py (the schema's single source of truth)
+# rather than redefined here -- same values as G7, this is a dedup only.
+_VALID_VERDICTS = VALID_VERDICTS
+_VALID_PATTERNS = VALID_PATTERNS
+_REQUIRED_KEYS = REQUIRED_OUTPUT_KEYS
 
 
 def _fail(reason: str, detail: str = "") -> dict:

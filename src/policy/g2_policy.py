@@ -83,7 +83,32 @@ def _r6_evidence_present(ledger: dict) -> bool:
     not need to, and does not, re-check hub_flag. Never reads
     HHG_CONNECTED_TO-derived evidence (connected_via_case) -- Q9 never
     gathers that, so it cannot leak in here. Never reads risk_score.
+
+    G8 defect fix: `tool_calls[].curated_result_summary` is intentionally
+    _trim()-collapsed by workflow.py (_MAX_LIST_SAMPLE=5) -- for a real,
+    highly-connected card (HHG-011's device alone returns 795 other_cards
+    entries), `other_cards` becomes {"count": 795, "sample": [...]}
+    instead of a list, and iterating a dict yields its keys as bare
+    strings, crashing on entry.get(...) (discovered via a live G8 run,
+    not previously covered by any fixture-based test, all of which use
+    <=5-entry lists that _trim() never touches). Reads `full_evidence`
+    (untrimmed, added in G7) when present; falls back to the old
+    tool_calls-based path only for ledgers that predate that key, so
+    every existing hand-built test fixture keeps working unchanged.
+    isinstance(entry, dict) is a defensive guard in both paths so a
+    similarly-shaped collapsed dict can never crash this function again.
     """
+    full_evidence = ledger.get("full_evidence")
+    if full_evidence is not None:
+        cross_card = full_evidence.get("cross_card_fraud_verification") or {}
+        for path in ("via_device", "via_region"):
+            path_result = cross_card.get(path)
+            if path_result:
+                for entry in path_result.get("other_cards", []):
+                    if isinstance(entry, dict) and entry.get("has_confirmed_fraud"):
+                        return True
+        return False
+
     for tc in ledger.get("tool_calls", []):
         if tc.get("tool") == "cross_card_fraud_verification" and tc.get("success"):
             result = tc.get("curated_result_summary") or {}
@@ -91,7 +116,7 @@ def _r6_evidence_present(ledger: dict) -> bool:
                 path_result = result.get(path)
                 if path_result:
                     for entry in path_result.get("other_cards", []):
-                        if entry.get("has_confirmed_fraud"):
+                        if isinstance(entry, dict) and entry.get("has_confirmed_fraud"):
                             return True
     return False
 
