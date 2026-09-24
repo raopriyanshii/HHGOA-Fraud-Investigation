@@ -1,0 +1,59 @@
+{
+  "case_id": "HHG-020",
+  "case": {
+    "status": "closed_fraud",
+    "verdict": "fraud",
+    "fraud_probability": 0.95,
+    "pattern": "account_takeover",
+    "pattern_description": "",
+    "affected_txn_ids": [
+      "3509359"
+    ],
+    "first_suspicious_txn_id": "3509359",
+    "connected_card_ids": [],
+    "connected_device_profiles": [],
+    "exposure_usd": 125.08,
+    "evidence": [
+      {
+        "claim": "G1 escalation basis: the customer's own historical case record includes at least one confirmed-fraud case",
+        "source": "graph",
+        "ref": "g1:recommendation_basis",
+        "entity_ids": [
+          "CC-2277",
+          "CC-2447"
+        ]
+      }
+    ],
+    "similar_prior_cases": [
+      "CC-2447",
+      "CC-2277"
+    ],
+    "summary": "Transaction 3509359 was confirmed fraudulent by deterministic rules (direct_confirmed_fraud) and is linked to a historical account takeover pattern for customer C12265. Escalation is recommended.",
+    "written_to_graph": true,
+    "graph_case_id": "HHG-020"
+  },
+  "evidence_requests": [],
+  "next_best_actions": {
+    "initial": [],
+    "final": [
+      {
+        "action": "CREATE_CASE",
+        "route": "auto",
+        "reason": "\u00a73a: fraud probability 0.95 reaches the 0.30 case-opening threshold"
+      }
+    ],
+    "what_changed": "added CREATE_CASE once the validated reasoning output (verdict/fraud_probability/pattern/exposure_usd) was available"
+  },
+  "sar": {
+    "file": false,
+    "reason": "",
+    "narrative": "",
+    "subjects": [],
+    "total_amount_usd": 0,
+    "activity_dates": []
+  },
+  "stop_reason": "G1 investigation completed (recommendation: escalate); the reasoning layer produced a validated 'fraud' verdict from the evidence gathered. No evidence-request gap existed, so no further steps were taken.",
+  "tool_calls": 3,
+  "tokens": 0,
+  "latency_s": 6.267
+}

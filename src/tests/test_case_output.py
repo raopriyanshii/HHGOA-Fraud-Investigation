@@ -294,18 +294,86 @@ def test_final_g2_pass_evaluated_exactly_once_on_success(monkeypatch):
     real_evaluate = g2_policy.evaluate
     calls = []
 
-    def counting_evaluate(ledger, validated=None):
-        calls.append(validated)
-        return real_evaluate(ledger, validated)
+    def counting_evaluate(ledger, validated=None, customer_response=None):
+        calls.append((validated, customer_response))
+        return real_evaluate(ledger, validated, customer_response)
 
     monkeypatch.setattr(co.g2_policy, "evaluate", counting_evaluate)
 
     ledger = _base_ledger()
-    call_llm = _fake_call_llm(_valid_llm_response())
+    # fraud_probability=0.9 keeps this fixture above the G12 evidence-loop
+    # gate's own <0.70 ceiling (src.agent.evidence_loop._should_request_
+    # evidence) -- the point of THIS test is the no-evidence-request case,
+    # covered separately below (test_final_g2_pass_evaluated_twice_when_
+    # evidence_request_is_simulated) for the case where it fires.
+    call_llm = _fake_call_llm(_valid_llm_response(fraud_probability=0.9))
     outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
     assert outcome["ok"] is True
     assert len(calls) == 1  # investigate_and_assemble calls g2_policy.evaluate exactly once itself
-    assert calls[0] is not None  # always the post-reasoning call, with validated
+    assert calls[0][0] is not None  # always the post-reasoning call, with validated
+    assert calls[0][1] is None  # no evidence request simulated -- no customer_response
+
+
+# --- G12: evidence-request loop wired into investigate_and_assemble ---
+
+def test_final_g2_pass_evaluated_twice_when_evidence_request_is_simulated(monkeypatch):
+    real_evaluate = g2_policy.evaluate
+    calls = []
+
+    def counting_evaluate(ledger, validated=None, customer_response=None):
+        calls.append((validated, customer_response))
+        return real_evaluate(ledger, validated, customer_response)
+
+    monkeypatch.setattr(co.g2_policy, "evaluate", counting_evaluate)
+
+    ledger = _base_ledger()
+    # verdict "uncertain" (default) + fraud_probability 0.3 (default) is
+    # exactly the G12 gate's own weak-single-signal condition.
+    call_llm = _fake_call_llm(_valid_llm_response())
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    assert outcome["ok"] is True
+    assert len(calls) == 2
+    assert calls[0][1] is None  # first pass: no customer_response
+    assert calls[1][1] in ("confirmed", "denied", "no_reply")  # second pass: simulated response applied
+    assert len(outcome["evidence_requests"]) == 1
+
+
+def test_evidence_requests_absent_for_confident_legitimate_verdict():
+    ledger = _base_ledger()
+    call_llm = _fake_call_llm(_valid_llm_response(verdict="legitimate", fraud_probability=0.05))
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    assert outcome["ok"] is True
+    assert outcome["evidence_requests"] == []
+    assert outcome["next_best_actions"]["what_changed"] == "nothing"
+
+
+def test_evidence_requests_absent_for_confident_fraud_verdict():
+    ledger = _base_ledger()
+    call_llm = _fake_call_llm(_valid_llm_response(verdict="fraud", fraud_probability=0.95))
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    assert outcome["ok"] is True
+    assert outcome["evidence_requests"] == []
+
+
+def test_evidence_requests_present_and_shaped_for_weak_uncertain_signal():
+    ledger = _base_ledger()
+    call_llm = _fake_call_llm(_valid_llm_response(verdict="uncertain", fraud_probability=0.3))
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    assert outcome["ok"] is True
+    assert len(outcome["evidence_requests"]) == 1
+    request = outcome["evidence_requests"][0]
+    assert set(request.keys()) == {"type", "asked_after_step", "assumed_response"}
+    assert request["type"] == "customer_validation"  # no R5 pattern match in the default fixture
+    assert request["asked_after_step"] == 0  # default fixture's tool_calls is []
+    assert isinstance(request["assumed_response"], str) and request["assumed_response"]
+
+
+def test_stop_reason_mentions_evidence_request_when_one_was_simulated():
+    ledger = _base_ledger()
+    call_llm = _fake_call_llm(_valid_llm_response(verdict="uncertain", fraud_probability=0.3))
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    assert outcome["ok"] is True
+    assert "evidence request" in outcome["stop_reason"]
 
 
 def test_final_g2_pass_not_evaluated_when_llm_call_fails(monkeypatch):
@@ -662,3 +730,302 @@ def test_next_best_actions_describes_removed_actions_too():
     g2_final = _base_g2_result(recommended=[])
     actions = co._next_best_actions(g2_initial, g2_final)
     assert actions["what_changed"] == "removed DECLINE_TRANSACTION once the validated reasoning output (verdict/fraud_probability/pattern/exposure_usd) was available"
+
+
+# --- G13: SAR (Part 2) construction ---
+
+_R6_QUALIFYING = {"other_cards": [
+    {"card_key": "C99999:1", "customer_id": "C99999", "same_customer": False, "has_confirmed_fraud": True, "confirmed_fraud_case_ids": ["CC-9"]},
+]}
+
+
+def _sar_ready_ledger(**overrides):
+    return _base_ledger(
+        tool_calls=[{
+            "order": 1, "tool": "cross_card_fraud_verification", "arguments": {"card_key": "C00001:1"},
+            "success": True, "curated_result_summary": {"via_device": _R6_QUALIFYING, "via_region": None},
+        }],
+        full_evidence={
+            "combined_evidence": {
+                "transaction": {"TransactionID": 100, "ts": "2016-11-14 09:12:00", "TransactionAmt": 50.0},
+                "card": {"card_key": "C00001:1"},
+                "customer": {"customer_id": "C00001"},
+                "temporal_activity": [
+                    {"TransactionID": 100, "ts": "2016-11-14 09:12:00", "TransactionAmt": 50.0, "channel": "online"},
+                    {"TransactionID": 101, "ts": "2016-11-15 10:00:00", "TransactionAmt": 20.0, "channel": "online"},
+                ],
+                "device_evidence": {"device_profile": "SAMSUNG SM-G892A Build/NRD90M", "hub_flag": False},
+                "billing_region": {"addr1": 444.0, "hub_flag": True},
+                "historical_cases": {"direct_cases": [], "connected_cases": []},
+                "connected_cards": {"connected_via_case": [], "connected_via_device": []},
+            },
+            "cross_card_fraud_verification": {"via_device": _R6_QUALIFYING, "via_region": None},
+        },
+        **overrides,
+    )
+
+
+def test_sar_file_true_produces_grounded_narrative_subjects_amount_and_dates():
+    ledger = _sar_ready_ledger()
+    call_llm = _fake_call_llm(_valid_llm_response(
+        verdict="fraud", fraud_probability=0.9, affected_txn_ids=[100, 101], first_suspicious_txn_id=100,
+        pattern="account_takeover", summary="Two transactions on card C00001:1 show mixed-channel activity inconsistent with the cardholder.",
+    ))
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    assert outcome["ok"] is True
+    sar = outcome["sar"]
+    assert sar["file"] is True
+    assert sar["reason"].startswith("R6")
+    assert "SAMSUNG SM-G892A Build/NRD90M" in sar["reason"]  # G13: names the actual shared element
+
+    # narrative: 6-12 sentences, non-empty, grounded
+    sentence_count = sar["narrative"].count(". ") + 1
+    assert 6 <= sentence_count <= 12
+    assert "C00001" in sar["narrative"]
+    assert "SAMSUNG SM-G892A Build/NRD90M" in sar["narrative"]
+
+    # subjects: populated, deduplicated, no invented ids
+    assert "C00001" in sar["subjects"]
+    assert "C00001:1" in sar["subjects"]
+    assert "SAMSUNG SM-G892A Build/NRD90M" in sar["subjects"]
+    assert "C99999:1" in sar["subjects"]  # the real R6-connected card
+    assert len(sar["subjects"]) == len(set(sar["subjects"]))  # deduplicated
+
+    # total_amount_usd: exactly the validator's own exposure_usd, never recomputed
+    assert sar["total_amount_usd"] == outcome["case"]["exposure_usd"]
+
+    # activity_dates: chronological [first, last], derived from real timestamps
+    assert sar["activity_dates"] == ["2016-11-14", "2016-11-15"]
+
+
+def test_sar_file_false_produces_exact_empty_values():
+    ledger = _base_ledger()  # no cross_card evidence -- nothing grounds FILE_REPORT
+    call_llm = _fake_call_llm(_valid_llm_response(verdict="legitimate", fraud_probability=0.05))
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    assert outcome["ok"] is True
+    assert outcome["sar"] == {"file": False, "reason": "", "narrative": "", "subjects": [], "total_amount_usd": 0, "activity_dates": []}
+
+
+def test_sar_narrative_contains_no_ids_outside_known_grounded_set():
+    # Every card_key/customer_id/device string that appears in the
+    # narrative must come from this ledger's own known evidence -- never
+    # a fabricated id.
+    ledger = _sar_ready_ledger()
+    call_llm = _fake_call_llm(_valid_llm_response(
+        verdict="fraud", fraud_probability=0.9, affected_txn_ids=[100, 101], first_suspicious_txn_id=100,
+        pattern="account_takeover",
+    ))
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    sar = outcome["sar"]
+    known_ids = {"C00001", "C00001:1", "C99999:1", "SAMSUNG SM-G892A Build/NRD90M", "CC-9"}
+    assert set(sar["subjects"]) <= known_ids
+
+
+def test_sar_activity_dates_repeat_single_date_when_only_one_date_present():
+    ledger = _sar_ready_ledger()
+    ledger["full_evidence"]["combined_evidence"]["temporal_activity"] = [
+        {"TransactionID": 100, "ts": "2016-11-14 09:12:00", "TransactionAmt": 50.0, "channel": "online"},
+    ]
+    call_llm = _fake_call_llm(_valid_llm_response(
+        verdict="fraud", fraud_probability=0.9, affected_txn_ids=[100], first_suspicious_txn_id=100, pattern="account_takeover",
+    ))
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    assert outcome["sar"]["activity_dates"] == ["2016-11-14", "2016-11-14"]
+
+
+def test_sar_total_amount_usd_never_recalculated_from_raw_transactions():
+    ledger = _sar_ready_ledger()
+    call_llm = _fake_call_llm(_valid_llm_response(
+        verdict="fraud", fraud_probability=0.9, affected_txn_ids=[100], first_suspicious_txn_id=100, pattern="account_takeover",
+    ))
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    # Only txn 100 ($50.0) was grounded into affected_txn_ids -- txn 101
+    # ($20.0) exists in temporal_activity but was never claimed by the
+    # LLM, so it must not silently inflate total_amount_usd.
+    assert outcome["sar"]["total_amount_usd"] == 50.0
+    assert outcome["sar"]["total_amount_usd"] == outcome["case"]["exposure_usd"]
+
+
+# --- G13 review fix 1: narrative verdict sentence is grounded in
+# validated["verdict"], never a hardcoded "confirmed fraud" claim ---
+
+def test_sar_narrative_verdict_sentence_reflects_fraud_verdict():
+    ledger = _base_ledger()
+    validated = {"verdict": "fraud", "fraud_probability": 0.9, "pattern": "none", "pattern_description": "",
+                 "affected_txn_ids": [100], "exposure_usd": 50.0}
+    case = {"first_suspicious_txn_id": "100", "similar_prior_cases": [], "summary": ""}
+    narrative = co._sar_narrative(ledger, validated, case, "R2: customer denies the transaction")
+    assert "reached a 'fraud' verdict" in narrative
+    assert "confirmed fraud" not in narrative
+
+
+def test_sar_narrative_verdict_sentence_reflects_uncertain_verdict_never_claims_confirmed_fraud():
+    # The exact gap the G13 review flagged: R2's FILE_REPORT branch does
+    # NOT require validated["verdict"] == "fraud" (unlike R6/R9), so a
+    # FILE_REPORT-triggering result can carry any verdict. The narrative
+    # must say so honestly, never assert "confirmed fraud" regardless.
+    ledger = _base_ledger()
+    validated = {"verdict": "uncertain", "fraud_probability": 0.55, "pattern": "none", "pattern_description": "",
+                 "affected_txn_ids": [100], "exposure_usd": 1500.0}
+    case = {"first_suspicious_txn_id": "100", "similar_prior_cases": [], "summary": ""}
+    narrative = co._sar_narrative(ledger, validated, case, "R2: customer denies the transaction; exposure $1500.0 exceeds $1,000")
+    assert "reached a 'uncertain' verdict" in narrative
+    assert "confirmed fraud" not in narrative
+    assert "0.55" in narrative
+
+
+# --- G13 review fix 2: connected-card evidence is included by real
+# evidence presence, never by parsing the reason string for "R6" -- must
+# work identically for R9 ---
+
+def _r9_ready_ledger(**overrides):
+    ledger = _sar_ready_ledger()
+    ledger.update(overrides)
+    return ledger
+
+
+def test_r9_file_report_includes_connected_card_keys_in_subjects():
+    ledger = _r9_ready_ledger()  # same Q9 evidence as the R6 fixture; same_customer=False satisfies R9 too
+    call_llm = _fake_call_llm(_valid_llm_response(
+        verdict="fraud", fraud_probability=0.9, affected_txn_ids=[100], first_suspicious_txn_id=100,
+        pattern="undocumented", pattern_description="A coordinated pattern across unrelated customers.",
+    ))
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    assert outcome["sar"]["reason"].startswith("R9")  # confirms this went through the R9 path, not R6
+    assert "C99999:1" in outcome["sar"]["subjects"]  # the real R9/Q9-connected card, previously omitted
+
+
+def test_r9_file_report_includes_connected_card_sentence_in_narrative():
+    ledger = _r9_ready_ledger()
+    call_llm = _fake_call_llm(_valid_llm_response(
+        verdict="fraud", fraud_probability=0.9, affected_txn_ids=[100], first_suspicious_txn_id=100,
+        pattern="undocumented", pattern_description="A coordinated pattern across unrelated customers.",
+    ))
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    assert outcome["sar"]["reason"].startswith("R9")
+    assert "C99999:1" in outcome["sar"]["narrative"]
+    assert "already show confirmed fraud" in outcome["sar"]["narrative"]
+
+
+def test_r6_connected_card_subjects_and_sentence_still_present_after_fix():
+    # R6 behavior must be unchanged by switching the gate from a reason-
+    # string check to a direct evidence check -- R6's own Q9 evidence is
+    # real, so the connected card must still appear both places.
+    ledger = _sar_ready_ledger()
+    call_llm = _fake_call_llm(_valid_llm_response(
+        verdict="fraud", fraud_probability=0.9, affected_txn_ids=[100], first_suspicious_txn_id=100,
+        pattern="account_takeover",  # not "undocumented" -- takes the R6 path, not R9
+    ))
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    assert outcome["sar"]["reason"].startswith("R6")
+    assert "C99999:1" in outcome["sar"]["subjects"]
+    assert "C99999:1" in outcome["sar"]["narrative"]
+    assert "already show confirmed fraud" in outcome["sar"]["narrative"]
+
+
+def test_sar_subjects_and_narrative_omit_connected_cards_when_no_qualifying_q9_evidence():
+    # R2 path: FILE_REPORT fires from a customer denial, not Q9 evidence.
+    # No cross_card_fraud_verification data exists in this ledger at all,
+    # so _sar_connected_card_keys must be empty and neither subjects nor
+    # narrative should mention any connected card.
+    ledger = _base_ledger()
+    validated = {"verdict": "uncertain", "fraud_probability": 0.5, "pattern": "none", "pattern_description": "",
+                 "affected_txn_ids": [100], "exposure_usd": 1500.0}
+    case = {"first_suspicious_txn_id": "100", "similar_prior_cases": [], "summary": ""}
+    reason = "R2: customer denies the transaction (simulated response); exposure $1500.0 exceeds $1,000"
+    assert co._sar_subjects(ledger, reason) == ["C00001", "C00001:1"]
+    assert "already show confirmed fraud" not in co._sar_narrative(ledger, validated, case, reason)
+
+
+# --- submission-audit fix: sar.subjects capped to the same 5 connected
+# cards _sar_narrative actually names in prose ---
+
+_R6_QUALIFYING_MANY = {"other_cards": [
+    {"card_key": f"C9000{i}:1", "customer_id": f"C9000{i}", "same_customer": False, "has_confirmed_fraud": True, "confirmed_fraud_case_ids": [f"CC-{i}"]}
+    for i in range(7)
+]}
+
+
+def _sar_ready_ledger_many_connected(**overrides):
+    ledger = _sar_ready_ledger()
+    ledger["tool_calls"] = [{
+        "order": 1, "tool": "cross_card_fraud_verification", "arguments": {"card_key": "C00001:1"},
+        "success": True, "curated_result_summary": {"via_device": _R6_QUALIFYING_MANY, "via_region": None},
+    }]
+    ledger["full_evidence"]["cross_card_fraud_verification"] = {"via_device": _R6_QUALIFYING_MANY, "via_region": None}
+    ledger.update(overrides)
+    return ledger
+
+
+def test_sar_subjects_capped_at_five_connected_cards_with_more_than_five_available():
+    ledger = _sar_ready_ledger_many_connected()  # 7 real confirmed-fraud connected cards
+    call_llm = _fake_call_llm(_valid_llm_response(
+        verdict="fraud", fraud_probability=0.9, affected_txn_ids=[100], first_suspicious_txn_id=100, pattern="account_takeover",
+    ))
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    sar = outcome["sar"]
+    connected_in_subjects = [s for s in sar["subjects"] if s.startswith("C9000")]
+    assert len(connected_in_subjects) == 5  # capped, not all 7
+
+
+def test_sar_subjects_connected_cards_are_exactly_the_ones_named_in_narrative():
+    ledger = _sar_ready_ledger_many_connected()
+    call_llm = _fake_call_llm(_valid_llm_response(
+        verdict="fraud", fraud_probability=0.9, affected_txn_ids=[100], first_suspicious_txn_id=100, pattern="account_takeover",
+    ))
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    sar = outcome["sar"]
+    connected_in_subjects = {s for s in sar["subjects"] if s.startswith("C9000")}
+    connected_in_narrative = {s for s in co._sar_connected_card_keys(ledger)[:5] if s in sar["narrative"]}
+    assert connected_in_subjects == connected_in_narrative
+    assert len(connected_in_narrative) == 5
+    assert "and others" in sar["narrative"]  # confirms the narrative itself also discloses truncation
+
+
+def test_sar_no_connected_card_evidence_fabricated_or_lost_underlying_ledger():
+    # The underlying ledger's own Q9 evidence must be untouched by the cap
+    # -- _sar_connected_card_keys(ledger) itself still returns all 7 real
+    # entries; only the SAR-facing subjects/narrative are capped for
+    # display, nothing is deleted from the source of truth.
+    ledger = _sar_ready_ledger_many_connected()
+    all_connected = co._sar_connected_card_keys(ledger)
+    assert len(all_connected) == 7
+    assert all(cid.startswith("C9000") for cid in all_connected)
+    call_llm = _fake_call_llm(_valid_llm_response(
+        verdict="fraud", fraud_probability=0.9, affected_txn_ids=[100], first_suspicious_txn_id=100, pattern="account_takeover",
+    ))
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    subjects = set(outcome["sar"]["subjects"])
+    # every subject that IS present must be a real, ungrounded-nothing id
+    assert subjects <= set(all_connected) | {"C00001", "C00001:1", "SAMSUNG SM-G892A Build/NRD90M"}
+
+
+def test_r9_subjects_also_capped_at_five_connected_cards():
+    ledger = _sar_ready_ledger_many_connected()
+    call_llm = _fake_call_llm(_valid_llm_response(
+        verdict="fraud", fraud_probability=0.9, affected_txn_ids=[100], first_suspicious_txn_id=100,
+        pattern="undocumented", pattern_description="A coordinated pattern across unrelated customers.",
+    ))
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    assert outcome["sar"]["reason"].startswith("R9")
+    connected_in_subjects = [s for s in outcome["sar"]["subjects"] if s.startswith("C9000")]
+    assert len(connected_in_subjects) == 5
+
+
+def test_r6_still_names_connected_cards_after_cap_fix_when_five_or_fewer():
+    # R6 with <=5 connected cards (the common case) must still include all
+    # of them, unchanged from before this fix -- the cap only matters once
+    # there are more than 5.
+    ledger = _sar_ready_ledger()  # exactly 1 connected card
+    call_llm = _fake_call_llm(_valid_llm_response(
+        verdict="fraud", fraud_probability=0.9, affected_txn_ids=[100], first_suspicious_txn_id=100, pattern="account_takeover",
+    ))
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    assert "C99999:1" in outcome["sar"]["subjects"]
+
+
+def test_sar_file_false_subjects_unaffected_by_cap_fix():
+    ledger = _base_ledger()
+    call_llm = _fake_call_llm(_valid_llm_response(verdict="legitimate", fraud_probability=0.05))
+    outcome = run(co.investigate_and_assemble(ledger, _base_g2_result(), call_llm=call_llm))
+    assert outcome["sar"] == {"file": False, "reason": "", "narrative": "", "subjects": [], "total_amount_usd": 0, "activity_dates": []}

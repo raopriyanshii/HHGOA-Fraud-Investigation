@@ -1,0 +1,68 @@
+{
+  "case_id": "HHG-016",
+  "case": {
+    "status": "open",
+    "verdict": "uncertain",
+    "fraud_probability": 0.45,
+    "pattern": "undocumented",
+    "pattern_description": "No established fraud pattern matches the evidence; the activity shows extensive card sharing on a single device without clear indicators of fraud.",
+    "affected_txn_ids": [
+      "3534820"
+    ],
+    "first_suspicious_txn_id": "3534820",
+    "connected_card_ids": [],
+    "connected_device_profiles": [],
+    "exposure_usd": 59.67,
+    "evidence": [],
+    "similar_prior_cases": [],
+    "summary": "Transaction 3534820 was processed online using a Visa debit card from a device that has been used with many distinct cards. No direct fraud signals were detected, and the deterministic layer deemed evidence insufficient.",
+    "written_to_graph": true,
+    "graph_case_id": "HHG-016"
+  },
+  "evidence_requests": [
+    {
+      "type": "customer_validation",
+      "asked_after_step": 2,
+      "assumed_response": "Simulated customer validation response: no reply within the 24-hour window. Benchmark simulation only -- no real 24 hours elapsed and no real customer/analyst reply was received; this project has no live customer or analyst channel (organizer README, policy \u00a75). This is the one, fixed assumption always made when evidence is requested, recorded here honestly as state='no_reply'."
+    }
+  ],
+  "next_best_actions": {
+    "initial": [
+      {
+        "action": "CREATE_CASE",
+        "route": "auto",
+        "reason": "\u00a73a: customer disputes a charge (trigger_type == 'customer_report')"
+      }
+    ],
+    "final": [
+      {
+        "action": "DECLINE_TRANSACTION",
+        "route": "L1",
+        "reason": "R4: no reply within 24 hours (simulated benchmark response); decline pending authorizations"
+      },
+      {
+        "action": "MONITOR_CARD",
+        "route": "auto",
+        "reason": "R4: no reply within 24 hours (simulated benchmark response)"
+      },
+      {
+        "action": "CREATE_CASE",
+        "route": "auto",
+        "reason": "\u00a73a: customer disputes a charge (trigger_type == 'customer_report')"
+      }
+    ],
+    "what_changed": "added DECLINE_TRANSACTION, MONITOR_CARD once the validated reasoning output (verdict/fraud_probability/pattern/exposure_usd) was available"
+  },
+  "sar": {
+    "file": false,
+    "reason": "",
+    "narrative": "",
+    "subjects": [],
+    "total_amount_usd": 0,
+    "activity_dates": []
+  },
+  "stop_reason": "G1 investigation completed (recommendation: insufficient_evidence); the reasoning layer produced a validated 'uncertain' verdict from the evidence gathered. One evidence request was simulated and its assumed response applied to the final next-best-action recommendation (see evidence_requests).",
+  "tool_calls": 3,
+  "tokens": 0,
+  "latency_s": 10.682
+}

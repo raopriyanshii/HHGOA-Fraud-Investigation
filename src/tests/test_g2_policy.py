@@ -409,13 +409,75 @@ def test_r6_monitor_connected_cards_recommended_when_q9_evidence_qualifies():
     assert entry["reason"].startswith("R6")
 
 
-# 9. R6 FILE_REPORT works (route L2)
-def test_r6_file_report_recommended_when_q9_evidence_qualifies():
+# 9. R6 FILE_REPORT works (route L2) -- G13: now requires this case's own
+# validated verdict to be "fraud" (organizer §3a: "confirmed or strongly
+# suspected"), so a validated reasoning result is required.
+def test_r6_file_report_recommended_when_q9_evidence_qualifies_and_verdict_is_fraud():
     ledger = _base_ledger(tool_calls=[_q9_call(2, via_device=_QUALIFYING_VIA_DEVICE)])
-    result = g2.evaluate(ledger)
+    result = g2.evaluate(ledger, _validated(verdict="fraud"))
     entry = next(e for e in result["recommended"] if e["action"] == "FILE_REPORT")
     assert entry["route"] == "L2"
     assert entry["reason"].startswith("R6")
+
+
+def test_r6_file_report_deferred_pre_reasoning_even_with_qualifying_q9_evidence():
+    # G13: without validated (this case's own verdict isn't known yet),
+    # FILE_REPORT can no longer fire via R6 even though Q9's evidence
+    # itself qualifies -- unlike CREATE_CASE/MONITOR_CONNECTED_CARDS,
+    # which stay ungated (see test_r6_create_case_recommended_when_q9_
+    # evidence_qualifies / test_r6_monitor_connected_cards_recommended_
+    # when_q9_evidence_qualifies above, both still passing unchanged).
+    ledger = _base_ledger(tool_calls=[_q9_call(2, via_device=_QUALIFYING_VIA_DEVICE)])
+    result = g2.evaluate(ledger)
+    assert any(e["action"] == "FILE_REPORT" for e in result["deferred"])
+    assert not any(e["action"] == "FILE_REPORT" for e in result["recommended"])
+
+
+def test_r6_file_report_deferred_when_verdict_is_not_fraud_even_with_qualifying_q9_evidence():
+    # The exact gap the SAR audit flagged: another card's confirmed fraud
+    # must not be sufficient by itself when THIS case's own reasoning
+    # concluded "legitimate" (or "uncertain").
+    ledger = _base_ledger(tool_calls=[_q9_call(2, via_device=_QUALIFYING_VIA_DEVICE)])
+    for verdict in ("legitimate", "uncertain"):
+        result = g2.evaluate(ledger, _validated(verdict=verdict))
+        assert any(e["action"] == "FILE_REPORT" for e in result["deferred"]), verdict
+        assert not any(e["action"] == "FILE_REPORT" for e in result["recommended"]), verdict
+
+
+def test_r6_file_report_reason_names_actual_device_profile():
+    ledger = _base_ledger(
+        tool_calls=[_q9_call(2, via_device=_QUALIFYING_VIA_DEVICE)],
+        full_evidence={
+            "combined_evidence": {"device_evidence": {"device_profile": "SAMSUNG SM-G892A Build/NRD90M"}, "billing_region": None},
+            "cross_card_fraud_verification": {"via_device": _QUALIFYING_VIA_DEVICE, "via_region": None},
+        },
+    )
+    result = g2.evaluate(ledger, _validated(verdict="fraud"))
+    entry = next(e for e in result["recommended"] if e["action"] == "FILE_REPORT")
+    assert "SAMSUNG SM-G892A Build/NRD90M" in entry["reason"]
+    assert entry["reason"].startswith("R6")
+
+
+def test_r6_file_report_reason_names_actual_billing_region():
+    ledger = _base_ledger(
+        tool_calls=[_q9_call(2, via_region=_QUALIFYING_VIA_DEVICE)],
+        full_evidence={
+            "combined_evidence": {"device_evidence": None, "billing_region": {"addr1": 444.0}},
+            "cross_card_fraud_verification": {"via_device": None, "via_region": _QUALIFYING_VIA_DEVICE},
+        },
+    )
+    result = g2.evaluate(ledger, _validated(verdict="fraud"))
+    entry = next(e for e in result["recommended"] if e["action"] == "FILE_REPORT")
+    assert "444.0" in entry["reason"]
+
+
+def test_r6_file_report_reason_falls_back_to_generic_label_without_a_known_value():
+    # Q9 evidence qualifies, but this ledger shape has no full_evidence at
+    # all -- must not fabricate a device/region value.
+    ledger = _base_ledger(tool_calls=[_q9_call(2, via_device=_QUALIFYING_VIA_DEVICE)])
+    result = g2.evaluate(ledger, _validated(verdict="fraud"))
+    entry = next(e for e in result["recommended"] if e["action"] == "FILE_REPORT")
+    assert "R6: shared device profile" in entry["reason"]
 
 
 # 10. Q9 evidence without confirmed fraud remains insufficient
@@ -781,7 +843,7 @@ def test_section_3a_probability_does_not_override_existing_customer_report_reaso
 
 def test_r9_undocumented_pattern_with_cross_customer_evidence_recommends_file_report():
     ledger = _base_ledger(tool_calls=[_q9_call(1, via_device=_QUALIFYING_VIA_DEVICE)])
-    result = g2.evaluate(ledger, _validated(pattern="undocumented", pattern_description="a new pattern"))
+    result = g2.evaluate(ledger, _validated(verdict="fraud", pattern="undocumented", pattern_description="a new pattern"))
     entry = next(e for e in result["recommended"] if e["action"] == "FILE_REPORT")
     assert entry["route"] == "L2"
     assert entry["reason"].startswith("R9")
@@ -789,17 +851,26 @@ def test_r9_undocumented_pattern_with_cross_customer_evidence_recommends_file_re
 
 def test_r9_undocumented_pattern_without_cross_customer_evidence_leaves_file_report_deferred():
     ledger = _base_ledger()  # no cross_card_fraud_verification call at all
-    result = g2.evaluate(ledger, _validated(pattern="undocumented", pattern_description="a new pattern"))
+    result = g2.evaluate(ledger, _validated(verdict="fraud", pattern="undocumented", pattern_description="a new pattern"))
     assert any(e["action"] == "FILE_REPORT" for e in result["deferred"])
 
 
 def test_r9_cross_customer_evidence_without_undocumented_pattern_leaves_file_report_deferred():
     ledger = _base_ledger(tool_calls=[_q9_call(1, via_device=_QUALIFYING_VIA_DEVICE)])
-    result = g2.evaluate(ledger, _validated(pattern="none"))
+    result = g2.evaluate(ledger, _validated(verdict="fraud", pattern="none"))
     # R6 evidence is present too (same underlying fixture), so FILE_REPORT
     # is actually RECOMMENDED here via R6 -- assert it's R6, not R9.
     entry = next(e for e in result["recommended"] if e["action"] == "FILE_REPORT")
     assert entry["reason"].startswith("R6")
+
+
+def test_r9_file_report_deferred_when_verdict_is_not_fraud_even_with_undocumented_pattern():
+    # G13: same audit gap as R6 -- an undocumented pattern with real
+    # cross-customer evidence must not file a report if THIS case's own
+    # verdict isn't "fraud".
+    ledger = _base_ledger(tool_calls=[_q9_call(1, via_device=_QUALIFYING_VIA_DEVICE)])
+    result = g2.evaluate(ledger, _validated(verdict="uncertain", pattern="undocumented", pattern_description="a new pattern"))
+    assert any(e["action"] == "FILE_REPORT" for e in result["deferred"])
 
 
 def test_r9_same_customer_confirmed_fraud_does_not_satisfy_cross_customer_clause():
@@ -841,7 +912,7 @@ def test_block_card_pre_reasoning_pass_unaffected_by_this_change():
 # --- pre-reasoning pass is completely unaffected by this change ---
 
 def test_pre_reasoning_pass_unchanged_even_when_every_new_condition_would_qualify():
-    # A ledger engineered so that ALL FOUR new post-reasoning paths (R8,
+    # A ledger engineered so that ALL new post-reasoning paths (R8,
     # section 3a, R9, BLOCK_CARD route) would fire if validated were
     # given -- evaluate(ledger) alone (no validated) must still leave
     # every one of them exactly as before this change.
@@ -853,12 +924,16 @@ def test_pre_reasoning_pass_unchanged_even_when_every_new_condition_would_qualif
     result = g2.evaluate(ledger)
     for action in ("ESCALATE_TO_ANALYST", "BLOCK_CARD"):
         assert any(e["action"] == action for e in result["deferred"])
-    # CREATE_CASE and FILE_REPORT are RECOMMENDED here, but via R6 -- not
-    # via the new section-3a/R9 paths, which never fire without validated.
+    # CREATE_CASE is RECOMMENDED here via R6 -- CREATE_CASE's own R6 path
+    # (unlike FILE_REPORT's) was never gated on validated at all.
     create_case = next(e for e in result["recommended"] if e["action"] == "CREATE_CASE")
     assert create_case["reason"].startswith("R6")
-    file_report = next(e for e in result["recommended"] if e["action"] == "FILE_REPORT")
-    assert file_report["reason"].startswith("R6")
+    # G13: FILE_REPORT's R6 path is now gated on this case's own validated
+    # verdict == "fraud" (organizer §3a) -- with validated=None entirely,
+    # that can never hold, so FILE_REPORT stays DEFERRED here even though
+    # the same Q9 evidence that grounds CREATE_CASE above is present.
+    assert any(e["action"] == "FILE_REPORT" for e in result["deferred"])
+    assert not any(e["action"] == "FILE_REPORT" for e in result["recommended"])
 
 
 def test_canonical_order_and_four_state_model_hold_with_validated_provided():
@@ -893,3 +968,180 @@ def test_evaluate_does_not_mutate_validated_input():
     before = copy.deepcopy(validated)
     g2.evaluate(ledger, validated)
     assert validated == before
+
+
+# --- G12: customer_response (R2/R3/R4), simulated by src.agent.evidence_loop ---
+
+# R3: customer confirms -> CLOSE_NO_FRAUD
+
+def test_r3_close_no_fraud_recommended_when_customer_response_confirmed():
+    ledger = _base_ledger()
+    result = g2.evaluate(ledger, _validated(), customer_response="confirmed")
+    entry = next(e for e in result["recommended"] if e["action"] == "CLOSE_NO_FRAUD")
+    assert entry["route"] == "auto"
+    assert entry["reason"].startswith("R3")
+
+
+def test_close_no_fraud_stays_deferred_without_confirmed_response():
+    ledger = _base_ledger()
+    for customer_response in (None, "denied", "no_reply"):
+        result = g2.evaluate(ledger, _validated(), customer_response=customer_response)
+        assert any(e["action"] == "CLOSE_NO_FRAUD" for e in result["deferred"])
+        assert not any(e["action"] == "CLOSE_NO_FRAUD" for e in result["recommended"])
+
+
+# R4: no reply within 24h -> MONITOR_CARD + DECLINE_TRANSACTION, escalate if exposure > $500
+
+def test_r4_monitor_card_recommended_when_no_reply():
+    ledger = _base_ledger()
+    result = g2.evaluate(ledger, _validated(), customer_response="no_reply")
+    entry = next(e for e in result["recommended"] if e["action"] == "MONITOR_CARD")
+    assert entry["route"] == "auto"
+    assert entry["reason"].startswith("R4")
+
+
+def test_r4_decline_transaction_recommended_when_no_reply_independent_of_r5():
+    ledger = _base_ledger(pattern_evidence=_R5_NOT_MATCHED)
+    result = g2.evaluate(ledger, _validated(), customer_response="no_reply")
+    entry = next(e for e in result["recommended"] if e["action"] == "DECLINE_TRANSACTION")
+    assert entry["route"] == "L1"
+    assert entry["reason"].startswith("R4")
+
+
+def test_r4_escalate_to_analyst_recommended_when_no_reply_and_exposure_over_500():
+    ledger = _base_ledger()
+    result = g2.evaluate(ledger, _validated(verdict="fraud", exposure_usd=501), customer_response="no_reply")
+    entry = next(e for e in result["recommended"] if e["action"] == "ESCALATE_TO_ANALYST")
+    assert entry["reason"].startswith("R4")
+
+
+def test_r4_no_reply_cited_over_r8_when_verdict_is_uncertain_and_exposure_over_500():
+    # The realistic combination: src.agent.evidence_loop only ever
+    # simulates a response when validated["verdict"] == "uncertain", so
+    # R8's own "uncertain + exposure > 500" clause would otherwise always
+    # match first and mis-cite a genuinely no-reply case as R8 instead of
+    # the more specific, actually-applicable R4. R4 must win the citation
+    # here, even though R8's condition is also satisfied.
+    ledger = _base_ledger()
+    result = g2.evaluate(ledger, _validated(verdict="uncertain", exposure_usd=501), customer_response="no_reply")
+    entry = next(e for e in result["recommended"] if e["action"] == "ESCALATE_TO_ANALYST")
+    assert entry["reason"].startswith("R4")
+    assert not entry["reason"].startswith("R8")
+
+
+def test_r4_escalate_to_analyst_not_recommended_when_no_reply_and_exposure_at_or_below_500():
+    ledger = _base_ledger()
+    result = g2.evaluate(ledger, _validated(verdict="fraud", exposure_usd=500), customer_response="no_reply")
+    assert any(e["action"] == "ESCALATE_TO_ANALYST" for e in result["deferred"])
+
+
+def test_monitor_card_and_decline_stay_deferred_without_no_reply_response():
+    ledger = _base_ledger()
+    for customer_response in (None, "confirmed", "denied"):
+        result = g2.evaluate(ledger, _validated(), customer_response=customer_response)
+        assert any(e["action"] == "MONITOR_CARD" for e in result["deferred"])
+        assert not any(e["action"] == "MONITOR_CARD" for e in result["recommended"])
+
+
+# R2: customer denies -> BLOCK_CARD + CREATE_CASE, FILE_REPORT if exposure > $1,000 or R6
+
+def test_r2_create_case_recommended_when_denied():
+    ledger = _base_ledger(tool_calls=[_resolution_call(1, "risk_score")])  # confirmed not a customer dispute, no R6
+    result = g2.evaluate(ledger, _validated(fraud_probability=0.1), customer_response="denied")
+    entry = next(e for e in result["recommended"] if e["action"] == "CREATE_CASE")
+    assert entry["reason"].startswith("R2")
+
+
+def test_r2_block_card_recommended_when_denied_with_route_by_exposure():
+    ledger = _base_ledger()  # no R5 match -- proves R2's BLOCK_CARD trigger is independent of R5
+    result_l1 = g2.evaluate(ledger, _validated(exposure_usd=2500), customer_response="denied")
+    entry_l1 = next(e for e in result_l1["recommended"] if e["action"] == "BLOCK_CARD")
+    assert entry_l1["route"] == "L1"
+    assert entry_l1["reason"].startswith("R2")
+
+    result_l2 = g2.evaluate(ledger, _validated(exposure_usd=2500.01), customer_response="denied")
+    entry_l2 = next(e for e in result_l2["recommended"] if e["action"] == "BLOCK_CARD")
+    assert entry_l2["route"] == "L2"
+
+
+def test_r2_file_report_recommended_when_denied_and_exposure_over_1000():
+    ledger = _base_ledger()  # no R6 evidence -- exposure alone must ground this
+    result = g2.evaluate(ledger, _validated(exposure_usd=1000.01), customer_response="denied")
+    entry = next(e for e in result["recommended"] if e["action"] == "FILE_REPORT")
+    assert entry["route"] == "L2"
+    assert entry["reason"].startswith("R2")
+
+
+def test_r2_file_report_stays_deferred_when_denied_and_exposure_at_or_below_1000_without_r6():
+    ledger = _base_ledger()
+    result = g2.evaluate(ledger, _validated(exposure_usd=1000), customer_response="denied")
+    assert any(e["action"] == "FILE_REPORT" for e in result["deferred"])
+
+
+def test_create_case_block_card_file_report_stay_at_their_pre_g12_state_without_denied_response():
+    ledger = _base_ledger()
+    # fraud_probability below the §3a 0.30 threshold, so CREATE_CASE's
+    # only remaining live trigger in this fixture is the new R2 "denied"
+    # branch -- isolates that branch from the pre-existing §3a one.
+    for customer_response in (None, "confirmed", "no_reply"):
+        result = g2.evaluate(ledger, _validated(fraud_probability=0.1, exposure_usd=5000), customer_response=customer_response)
+        for action in ("CREATE_CASE", "BLOCK_CARD", "FILE_REPORT"):
+            assert any(e["action"] == action for e in result["deferred"]), (action, customer_response)
+
+
+# --- customer_response=None preserves pre-G12 behavior byte-for-byte ---
+
+def test_customer_response_none_is_byte_for_byte_identical_to_omitting_it():
+    ledger = _base_ledger(pattern_evidence=_R5_MATCHED, tool_calls=[_resolution_call(1, "risk_score")])
+    validated = _validated(verdict="uncertain", exposure_usd=1000)
+    assert g2.evaluate(ledger, validated) == g2.evaluate(ledger, validated, None)
+    assert g2.evaluate(ledger, validated) == g2.evaluate(ledger, validated, customer_response=None)
+
+
+def test_pre_reasoning_pass_unaffected_by_customer_response_without_validated():
+    # customer_response alone, with validated still None, must not
+    # spuriously recommend anything -- every new branch requires
+    # validated is not None (BLOCK_CARD/CREATE_CASE/FILE_REPORT/
+    # ESCALATE_TO_ANALYST) or ignores validated entirely
+    # (CLOSE_NO_FRAUD/MONITOR_CARD/DECLINE_TRANSACTION), so this is a
+    # meaningful check, not a vacuous one: CLOSE_NO_FRAUD and MONITOR_CARD
+    # only ever look at customer_response, never at validated.
+    ledger = _base_ledger()
+    result = g2.evaluate(ledger, None, customer_response="confirmed")
+    entry = next(e for e in result["recommended"] if e["action"] == "CLOSE_NO_FRAUD")
+    assert entry["reason"].startswith("R3")
+
+
+# --- structural invariants still hold with customer_response supplied ---
+
+def test_canonical_order_and_four_state_model_hold_with_customer_response():
+    ledger = _base_ledger(pattern_evidence=_R5_MATCHED)
+    for customer_response in ("confirmed", "denied", "no_reply"):
+        result = g2.evaluate(ledger, _validated(exposure_usd=5000), customer_response=customer_response)
+        all_actions = [e["action"] for bucket in ("recommended", "prohibited", "eligible_not_recommended", "deferred") for e in result[bucket]]
+        reconstructed = tuple(sorted(all_actions, key=g2.CANONICAL_ACTION_ORDER.index))
+        assert reconstructed == g2.CANONICAL_ACTION_ORDER
+        assert len(all_actions) == 14
+        seen = set()
+        for bucket in ("recommended", "prohibited", "eligible_not_recommended", "deferred"):
+            for e in result[bucket]:
+                assert e["action"] not in seen
+                seen.add(e["action"])
+
+
+def test_evaluate_with_customer_response_is_deterministic_across_repeated_calls():
+    ledger = _base_ledger()
+    validated = _validated(exposure_usd=2000)
+    result_1 = g2.evaluate(ledger, validated, customer_response="denied")
+    result_2 = g2.evaluate(ledger, validated, customer_response="denied")
+    assert result_1 == result_2
+
+
+def test_evaluate_does_not_mutate_input_with_customer_response():
+    ledger = _base_ledger()
+    validated = _validated(exposure_usd=2000)
+    before_ledger = copy.deepcopy(ledger)
+    before_validated = copy.deepcopy(validated)
+    g2.evaluate(ledger, validated, customer_response="denied")
+    assert ledger == before_ledger
+    assert validated == before_validated

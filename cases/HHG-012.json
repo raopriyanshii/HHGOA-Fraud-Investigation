@@ -1,0 +1,63 @@
+{
+  "case_id": "HHG-012",
+  "case": {
+    "status": "closed_fraud",
+    "verdict": "fraud",
+    "fraud_probability": 0.85,
+    "pattern": "undocumented",
+    "pattern_description": "No specific fraud pattern is conclusively matched. The evidence suggests a potential fraudulent episode but does not align with any predefined category.",
+    "affected_txn_ids": [
+      "3550470",
+      "3551245",
+      "3552000",
+      "3552020",
+      "3553253",
+      "3553342",
+      "3554541"
+    ],
+    "first_suspicious_txn_id": "3550470",
+    "connected_card_ids": [],
+    "connected_device_profiles": [],
+    "exposure_usd": 425.66,
+    "evidence": [
+      {
+        "claim": "G1 escalation basis: the customer's own historical case record includes at least one confirmed-fraud case",
+        "source": "graph",
+        "ref": "g1:recommendation_basis",
+        "entity_ids": [
+          "CC-2370"
+        ]
+      }
+    ],
+    "similar_prior_cases": [
+      "CC-2370"
+    ],
+    "summary": "The flagged transaction triggers escalation due to direct confirmed fraud evidence and high risk score. A fraud episode involving multiple in-person transactions is likely.",
+    "written_to_graph": true,
+    "graph_case_id": "HHG-012"
+  },
+  "evidence_requests": [],
+  "next_best_actions": {
+    "initial": [],
+    "final": [
+      {
+        "action": "CREATE_CASE",
+        "route": "auto",
+        "reason": "\u00a73a: fraud probability 0.85 reaches the 0.30 case-opening threshold"
+      }
+    ],
+    "what_changed": "added CREATE_CASE once the validated reasoning output (verdict/fraud_probability/pattern/exposure_usd) was available"
+  },
+  "sar": {
+    "file": false,
+    "reason": "",
+    "narrative": "",
+    "subjects": [],
+    "total_amount_usd": 0,
+    "activity_dates": []
+  },
+  "stop_reason": "G1 investigation completed (recommendation: escalate); the reasoning layer produced a validated 'fraud' verdict from the evidence gathered. No evidence-request gap existed, so no further steps were taken.",
+  "tool_calls": 3,
+  "tokens": 0,
+  "latency_s": 10.12
+}

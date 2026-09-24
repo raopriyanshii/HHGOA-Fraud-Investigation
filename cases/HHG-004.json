@@ -1,0 +1,72 @@
+{
+  "case_id": "HHG-004",
+  "case": {
+    "status": "closed_fraud",
+    "verdict": "fraud",
+    "fraud_probability": 0.95,
+    "pattern": "card_not_present_fraud",
+    "pattern_description": "",
+    "affected_txn_ids": [
+      "3580804",
+      "3583227",
+      "3583499",
+      "3583503",
+      "3584017",
+      "3585446"
+    ],
+    "first_suspicious_txn_id": "3580804",
+    "connected_card_ids": [],
+    "connected_device_profiles": [],
+    "exposure_usd": 343.58,
+    "evidence": [
+      {
+        "claim": "G1 escalation basis: the customer's own historical case record includes at least one confirmed-fraud case",
+        "source": "graph",
+        "ref": "g1:recommendation_basis",
+        "entity_ids": [
+          "CC-1736",
+          "CC-2121",
+          "CC-3778"
+        ]
+      }
+    ],
+    "similar_prior_cases": [
+      "CC-3778",
+      "CC-1736",
+      "CC-2121"
+    ],
+    "summary": "The customer has a single card that has recently generated multiple online transactions, including a flagged purchase. Historical cases for this customer show several confirmed card\u2011not\u2011present fraud incidents. No device or billing\u2011region evidence is present, but the pattern evidence supports a card\u2011not\u2011present fraud classification. The recommended action is to create a new case and block the card.",
+    "written_to_graph": true,
+    "graph_case_id": "HHG-004"
+  },
+  "evidence_requests": [],
+  "next_best_actions": {
+    "initial": [
+      {
+        "action": "CREATE_CASE",
+        "route": "auto",
+        "reason": "\u00a73a: customer disputes a charge (trigger_type == 'customer_report')"
+      }
+    ],
+    "final": [
+      {
+        "action": "CREATE_CASE",
+        "route": "auto",
+        "reason": "\u00a73a: customer disputes a charge (trigger_type == 'customer_report')"
+      }
+    ],
+    "what_changed": "nothing"
+  },
+  "sar": {
+    "file": false,
+    "reason": "",
+    "narrative": "",
+    "subjects": [],
+    "total_amount_usd": 0,
+    "activity_dates": []
+  },
+  "stop_reason": "G1 investigation completed (recommendation: escalate); the reasoning layer produced a validated 'fraud' verdict from the evidence gathered. No evidence-request gap existed, so no further steps were taken.",
+  "tool_calls": 3,
+  "tokens": 0,
+  "latency_s": 4.846
+}

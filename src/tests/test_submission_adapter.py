@@ -19,8 +19,18 @@ def _success_result(case_id="HHG-999", *, file_report=False, written_to_graph=Tr
     ]
     if file_report:
         final_actions.append(
-            {"action": "FILE_REPORT", "route": "L2", "reason": "R6: shared device links a second card"}
+            {"action": "FILE_REPORT", "route": "L2", "reason": "R6: shared device profile 'SAMSUNG SM-G892A' shows independently confirmed fraud on another card"}
         )
+        sar = {
+            "file": True,
+            "reason": "R6: shared device profile 'SAMSUNG SM-G892A' shows independently confirmed fraud on another card",
+            "narrative": "This report concerns customer C08623, card C08623:K2. The investigation's reasoning layer reached a 'fraud' verdict with a fraud probability of 0.9. 1 transaction(s) were identified as part of this episode, totaling $49. R6: shared device profile 'SAMSUNG SM-G892A' shows independently confirmed fraud on another card.",
+            "subjects": ["C08623", "C08623:K2"],
+            "total_amount_usd": 49,
+            "activity_dates": ["2016-12-10", "2016-12-10"],
+        }
+    else:
+        sar = {"file": False, "reason": "", "narrative": "", "subjects": [], "total_amount_usd": 0, "activity_dates": []}
     return {
         "case_id": case_id,
         "investigation_id": f"inv-{case_id}",
@@ -54,6 +64,7 @@ def _success_result(case_id="HHG-999", *, file_report=False, written_to_graph=Tr
                 "final": final_actions,
                 "what_changed": "nothing",
             },
+            "sar": sar,
             "stripped_ids": [],
             "stop_reason": "G1 investigation completed; validated verdict produced.",
         },
@@ -163,25 +174,59 @@ def test_evidence_copied_verbatim_on_success():
     assert out["case"]["evidence"] == result["outcome"]["case"]["evidence"]
 
 
-# 8. SAR mapping
-def test_sar_file_true_derived_from_file_report_action():
+# 8. SAR mapping -- G13: copied verbatim from case_output's own `sar`
+# (src.agent.case_output._build_sar), never re-derived by this adapter.
+def test_sar_copied_verbatim_on_success():
     result = _success_result(file_report=True)
     out = sa.build_submission_case(result)
+    assert out["sar"] == result["outcome"]["sar"]
     assert out["sar"]["file"] is True
-    assert out["sar"]["reason"] == "R6: shared device links a second card"
-    assert out["sar"]["narrative"] == ""
+    assert out["sar"]["narrative"] != ""  # G13: no longer hardcoded empty
 
 
-def test_sar_file_false_when_no_file_report_action():
-    out = sa.build_submission_case(_success_result(file_report=False))
+def test_sar_file_false_matches_case_output_empty_shape():
+    result = _success_result(file_report=False)
+    out = sa.build_submission_case(result)
+    assert out["sar"] == result["outcome"]["sar"]
+    assert out["sar"] == sa._EMPTY_SAR
+
+
+def test_sar_falls_back_to_empty_shape_when_outcome_omits_it():
+    # Defensive: an outcome dict that (still) doesn't carry a "sar" key at
+    # all (e.g. an older case_output.py result) must not crash the adapter.
+    result = _success_result(file_report=True)
+    del result["outcome"]["sar"]
+    out = sa.build_submission_case(result)
     assert out["sar"] == sa._EMPTY_SAR
 
 
 # 9. evidence_requests mapping
 def test_evidence_requests_always_empty():
+    # These three fixtures' "outcome" dicts don't carry an evidence_requests
+    # key at all (matching every case_output.py result produced before
+    # G12), so build_submission_case's outcome.get("evidence_requests", [])
+    # falls back to [] for all of them -- see
+    # test_evidence_requests_copied_verbatim_on_success below for the
+    # G12 pass-through case.
     assert sa.build_submission_case(_success_result())["evidence_requests"] == []
     assert sa.build_submission_case(_investigation_failure_result())["evidence_requests"] == []
     assert sa.build_submission_case(_runner_exception_result())["evidence_requests"] == []
+
+
+# G12: evidence_requests copied verbatim from a real evidence-loop result
+def test_evidence_requests_copied_verbatim_on_success():
+    result = _success_result()
+    result["outcome"]["evidence_requests"] = [
+        {"type": "customer_validation", "asked_after_step": 2, "assumed_response": "Simulated customer validation response: denies making this transaction; still has the card."},
+    ]
+    out = sa.build_submission_case(result)
+    assert out["evidence_requests"] == result["outcome"]["evidence_requests"]
+
+
+def test_evidence_requests_empty_on_failure_even_if_somehow_present():
+    result = _investigation_failure_result()
+    result["outcome"]["evidence_requests"] = [{"type": "customer_validation", "asked_after_step": 1, "assumed_response": "x"}]
+    assert sa.build_submission_case(result)["evidence_requests"] == []
 
 
 # 10. stop_reason mapping

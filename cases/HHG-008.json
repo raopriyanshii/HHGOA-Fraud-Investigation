@@ -1,0 +1,99 @@
+{
+  "case_id": "HHG-008",
+  "case": {
+    "status": "closed_fraud",
+    "verdict": "fraud",
+    "fraud_probability": 0.98,
+    "pattern": "card_not_present_new_device",
+    "pattern_description": "",
+    "affected_txn_ids": [
+      "3557979",
+      "3557987",
+      "3558054"
+    ],
+    "first_suspicious_txn_id": "3557979",
+    "connected_card_ids": [],
+    "connected_device_profiles": [],
+    "exposure_usd": 166.97,
+    "evidence": [
+      {
+        "claim": "G1 escalation basis: the customer's own historical case record includes at least one confirmed-fraud case",
+        "source": "graph",
+        "ref": "g1:recommendation_basis",
+        "entity_ids": [
+          "CC-0056",
+          "CC-0467",
+          "CC-0772",
+          "CC-1293",
+          "CC-1715",
+          "CC-1925",
+          "CC-2059",
+          "CC-2244",
+          "CC-2454",
+          "CC-2716",
+          "CC-3079",
+          "CC-3422",
+          "CC-3566",
+          "CC-3728",
+          "CC-3928",
+          "CC-4163",
+          "CC-4485",
+          "CC-5010"
+        ]
+      }
+    ],
+    "similar_prior_cases": [
+      "CC-2716",
+      "CC-3728",
+      "CC-3422",
+      "CC-4485",
+      "CC-2244",
+      "CC-4163",
+      "CC-0056",
+      "CC-1925",
+      "CC-5010",
+      "CC-1715",
+      "CC-0467",
+      "CC-2059",
+      "CC-2454",
+      "CC-0772",
+      "CC-3928",
+      "CC-3079",
+      "CC-1293",
+      "CC-3566"
+    ],
+    "summary": "Escalated due to a direct confirmation of fraud for transaction 3558054; the pattern aligns with previous card_not_present_new_device incidents in the customer\u2019s history.",
+    "written_to_graph": true,
+    "graph_case_id": "HHG-008"
+  },
+  "evidence_requests": [],
+  "next_best_actions": {
+    "initial": [
+      {
+        "action": "CREATE_CASE",
+        "route": "auto",
+        "reason": "\u00a73a: customer disputes a charge (trigger_type == 'customer_report')"
+      }
+    ],
+    "final": [
+      {
+        "action": "CREATE_CASE",
+        "route": "auto",
+        "reason": "\u00a73a: customer disputes a charge (trigger_type == 'customer_report')"
+      }
+    ],
+    "what_changed": "nothing"
+  },
+  "sar": {
+    "file": false,
+    "reason": "",
+    "narrative": "",
+    "subjects": [],
+    "total_amount_usd": 0,
+    "activity_dates": []
+  },
+  "stop_reason": "G1 investigation completed (recommendation: escalate); the reasoning layer produced a validated 'fraud' verdict from the evidence gathered. No evidence-request gap existed, so no further steps were taken.",
+  "tool_calls": 3,
+  "tokens": 0,
+  "latency_s": 5.342
+}

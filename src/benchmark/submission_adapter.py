@@ -16,13 +16,14 @@ policy, or graph-write logic. Every field below is either copied
 directly from the internal result, or is a disclosed, honest empty/zero
 placeholder for a capability this project does not yet implement:
 
-  - `evidence_requests` -- no evidence-request/response loop exists yet
-    (case_output.py's own next_best_actions always has initial == final)
-  - `sar.narrative`/`subjects`/`total_amount_usd`/`activity_dates` -- no
-    SAR-narrative generator exists yet; `sar.file`/`sar.reason` ARE
-    derived, deterministically, from the already-computed FILE_REPORT
-    entry in next_best_actions.final (required by the README: "Must
-    agree with whether FILE_REPORT appears in your final actions")
+  - `evidence_requests` -- copied verbatim from the internal result
+    (case_output.py's G12 evidence-request loop, src.agent.evidence_loop)
+    on success; `[]` on any failure path, honestly, never fabricated
+  - `sar` -- copied verbatim from the internal result (case_output.py's
+    G13 `_build_sar`, the one place `sar` is constructed) on success;
+    the organizer's exact required empty shape (`_EMPTY_SAR`) on any
+    failure path. This module does not derive or duplicate any SAR
+    field itself.
   - `tokens` -- this project never captures LLM usage/token-count
     metadata from either provider; reported as 0, not estimated
   - `case.connected_card_ids`/`connected_device_profiles` -- case_output.py
@@ -90,21 +91,6 @@ def _case_from_success(case: dict, written_to_graph: bool, graph_case_id: str) -
     }
 
 
-def _sar_from_next_best_actions(next_best_actions: dict) -> dict:
-    final_actions = next_best_actions.get("final") or []
-    file_report = next((a for a in final_actions if a.get("action") == "FILE_REPORT"), None)
-    if file_report is None:
-        return dict(_EMPTY_SAR)
-    return {
-        "file": True,
-        "reason": file_report.get("reason", ""),
-        "narrative": "",
-        "subjects": [],
-        "total_amount_usd": 0,
-        "activity_dates": [],
-    }
-
-
 def _tool_calls_count(result: dict) -> int:
     g1_tool_calls = (result.get("g1") or {}).get("tool_calls") or []
     graph_write = result.get("graph_write") or {}
@@ -129,21 +115,24 @@ def build_submission_case(result: dict) -> dict:
     if result.get("success") and outcome.get("ok"):
         case = _case_from_success(outcome["case"], written_to_graph, graph_case_id)
         next_best_actions = outcome["next_best_actions"]
+        evidence_requests = outcome.get("evidence_requests", [])
+        sar = outcome.get("sar") or dict(_EMPTY_SAR)
         stop_reason = outcome.get("stop_reason", "")
     else:
         case = dict(_EMPTY_CASE)
         case["written_to_graph"] = written_to_graph
         case["graph_case_id"] = graph_case_id
         next_best_actions = dict(_EMPTY_NEXT_BEST_ACTIONS)
+        evidence_requests = []
+        sar = dict(_EMPTY_SAR)
         stop_reason = outcome.get("stop_reason") or result.get("error") or "investigation did not complete"
 
-    sar = _sar_from_next_best_actions(next_best_actions)
     timing = result.get("timing_s") or {}
 
     return {
         "case_id": case_id,
         "case": case,
-        "evidence_requests": [],
+        "evidence_requests": evidence_requests,
         "next_best_actions": next_best_actions,
         "sar": sar,
         "stop_reason": stop_reason,

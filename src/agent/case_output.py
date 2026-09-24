@@ -8,22 +8,40 @@ only assembles already-computed, already-validated pieces, and it is the
 one place these three sources are combined: G1, G2, and the reasoning
 layer never see each other's output shape.
 
-Scope (deliberately limited this phase): produces `case` (Part 1) and
-`next_best_actions` (Part 3). `next_best_actions.initial` still equals
-`next_best_actions.final` whenever the post-reasoning G2 pass (G11-D)
-recommends the exact same actions as the pre-reasoning pass -- no
-evidence-request loop exists yet, matching the organizer's own rule "If
-you requested nothing, final equals initial" -- but they now genuinely
-CAN differ, when the validated verdict/fraud_probability/pattern/
-exposure_usd unlock a rule (R8, §3a, R9, or R5's BLOCK_CARD route) that
-the pre-reasoning ledger alone could not satisfy. Does NOT produce `sar`,
-`evidence_requests`, `stop_reason` (beyond the failure-path one below),
-`tool_calls`, `tokens`, `latency_s`, `connected_card_ids`,
-`connected_device_profiles`, `written_to_graph`, or `graph_case_id` --
-these remain later-phase work, not invented here.
+Scope: produces `case` (Part 1), `evidence_requests`, `next_best_actions`
+(Part 3), and `sar` (Part 2, G13). `next_best_actions.initial` still
+equals `next_best_actions.final` whenever nothing changed the
+pre-reasoning G2 pass's own recommendations -- matching the organizer's
+own rule "If you requested nothing, final equals initial" -- but they
+now genuinely CAN differ for two independent reasons: the validated
+verdict/fraud_probability/pattern/exposure_usd unlocking a rule (R8,
+§3a, R9, or R5's BLOCK_CARD route) the pre-reasoning ledger alone could
+not satisfy, and/or the G12 evidence-request loop (see
+src.agent.evidence_loop) simulating a response that unlocks R2/R3/R4.
+
+G13: `sar` (README "Answer Format", Part 2) is built here, deterministically,
+from data this module already has -- no new graph/LLM call. `sar.file`/
+`sar.reason` are read directly from the FILE_REPORT entry in
+`next_best_actions.final`, if any (must agree with whether FILE_REPORT
+appears there, per the organizer's own field definition). When it does,
+`total_amount_usd` is `validated["exposure_usd"]` (the reasoning
+validator's own deterministic sum -- never recalculated here),
+`activity_dates` is derived only from the timestamps `ledger.
+full_evidence.combined_evidence` already carries for
+`validated["affected_txn_ids"]`, `subjects` from entity IDs already
+present in that same evidence, and `narrative` is a deterministic,
+templated sentence sequence built only from already-validated/grounded
+fields -- never a second LLM call, never an invented fact. When
+FILE_REPORT is absent, `sar` is the organizer's exact required empty
+shape (`narrative=""`, `subjects=[]`, `total_amount_usd=0`,
+`activity_dates=[]`). Does NOT produce `stop_reason` (beyond the
+failure-path one below), `tool_calls`, `tokens`, `latency_s`,
+`connected_card_ids`, `connected_device_profiles`, `written_to_graph`,
+or `graph_case_id` -- these remain later-phase work, not invented here.
 """
 from __future__ import annotations
 
+from src.agent import evidence_loop
 from src.agent.reasoning import DEFAULT_LLM_TIMEOUT_S, CallLLM, build_evidence_package, get_llm_reasoning
 from src.agent.reasoning_validator import validate_reasoning_output
 from src.policy import g2_policy
@@ -276,20 +294,240 @@ def _evidence_list(ledger: dict, g2_result: dict) -> list[dict]:
     return evidence
 
 
-def _stop_reason_for_success(ledger: dict, validated: dict) -> str:
+# --- G13: SAR (Part 2) construction -- deterministic, evidence-grounded,
+# no LLM call. Only ever invoked when FILE_REPORT is in next_best_actions
+# .final (see _build_sar); the organizer's exact empty shape is used
+# otherwise. ---
+
+_EMPTY_SAR = {"file": False, "reason": "", "narrative": "", "subjects": [], "total_amount_usd": 0, "activity_dates": []}
+
+
+def _sar_ts_by_txn_id(ledger: dict) -> dict[int, str]:
+    """txn_id -> full timestamp string, built the same way reasoning_
+    validator.py's own amount_by_txn_id map is (full_evidence.combined_
+    evidence.transaction + .temporal_activity) -- reused here only for
+    activity_dates. No new query, no invented timestamp.
+    """
+    combined = (ledger.get("full_evidence") or {}).get("combined_evidence") or {}
+    ts_by_id: dict[int, str] = {}
+    txn = combined.get("transaction")
+    if txn and txn.get("TransactionID") is not None and txn.get("ts"):
+        ts_by_id[txn["TransactionID"]] = txn["ts"]
+    for t in combined.get("temporal_activity") or []:
+        if t.get("TransactionID") is not None and t.get("ts"):
+            ts_by_id[t["TransactionID"]] = t["ts"]
+    return ts_by_id
+
+
+def _sar_activity_dates(ledger: dict, validated: dict) -> list[str]:
+    """README: "First and last date of the activity, YYYY-MM-DD" -- a
+    two-element list. Scope is validated["affected_txn_ids"] only. Built
+    from the deduplicated, sorted SET of calendar dates found among those
+    transactions' own timestamps (never a new query), then reduced to
+    [first, last] -- repeating the single date when there is only one,
+    matching the organizer's own worked example. [] when no timestamp is
+    known for any affected transaction -- never a fabricated date.
+    """
+    ts_by_id = _sar_ts_by_txn_id(ledger)
+    dates = sorted({
+        ts_by_id[tid][:10] for tid in (validated.get("affected_txn_ids") or [])
+        if tid in ts_by_id and ts_by_id[tid]
+    })
+    if not dates:
+        return []
+    return [dates[0], dates[-1]]
+
+
+def _sar_connected_card_keys(ledger: dict) -> list[str]:
+    """Real, confirmed-fraud card_keys from Q9's own result (never a
+    closed-case id) -- reuses _q9_r6_entity_ids's already-gathered ids
+    and keeps only entries shaped like this project's own established
+    card_key convention (customer_id:card1, confirmed since Phase C --
+    see src.agent.reasoning's own docstring), since README `subjects`
+    names customers/cards/merchants/devices, not case ids.
+    """
+    return [i for i in _q9_r6_entity_ids(ledger) if ":" in i]
+
+
+_SAR_MAX_NAMED_CONNECTED_CARDS = 5  # matches _sar_narrative's own connected[:5] slice exactly
+
+
+def _sar_subjects(ledger: dict, file_report_reason: str) -> list[str]:
+    """README: "IDs of the customers, cards, merchants, and devices named
+    in the narrative." Only entity IDs already present in
+    ledger.full_evidence.combined_evidence (the flagged transaction's own
+    customer/card/device) plus, when Q9 evidence actually exists, the
+    real confirmed-fraud card_keys it returned -- capped to the same
+    _SAR_MAX_NAMED_CONNECTED_CARDS slice _sar_narrative itself names in
+    the narrative text (submission-audit fix: subjects must be entities
+    the narrative actually names, not every real card Q9 happens to
+    return -- a highly-connected card can have hundreds of confirmed-
+    fraud siblings, and only the first 5 are ever named in prose). Never
+    invented, deduplicated, order-preserving (primary customer/card
+    first).
+
+    `file_report_reason` is accepted for interface consistency with
+    _sar_narrative but is NEVER inspected here (G13 review fix): whether
+    connected cards are cited depends only on _sar_connected_card_keys(
+    ledger) actually returning real evidence, never on which rule's text
+    happens to appear in the reason string -- this applies equally to R6
+    and R9 (R9's own cross-customer evidence is a strict subset of R6's,
+    so the same real cards are just as legitimately part of an R9-
+    triggered report's subjects).
+    """
+    combined = (ledger.get("full_evidence") or {}).get("combined_evidence") or {}
+    subjects: list[str] = []
+
+    def _add(value):
+        if value and value not in subjects:
+            subjects.append(value)
+
+    _add((combined.get("customer") or {}).get("customer_id"))
+    _add((combined.get("card") or {}).get("card_key"))
+    _add((combined.get("device_evidence") or {}).get("device_profile"))
+
+    for card_key in _sar_connected_card_keys(ledger)[:_SAR_MAX_NAMED_CONNECTED_CARDS]:
+        _add(card_key)
+
+    return subjects
+
+
+def _sar_narrative(ledger: dict, validated: dict, case: dict, file_report_reason: str) -> str:
+    """README: 6-12 sentences, "who, what, when, where, how, and why it
+    is suspicious." Deterministic sentence sequence, no LLM call, built
+    only from already-validated/grounded fields -- a dimension whose
+    grounding data isn't available in this ledger is simply omitted, per
+    caller's instruction, rather than fabricated. `file_report_reason` is
+    the FILE_REPORT entry's own already-computed `reason` (from
+    g2_policy._evaluate_file_report, G13) -- for R6 it already names the
+    actual shared device profile/billing region value, so this function
+    does not re-derive that naming itself (avoids duplicating g2_policy's
+    own logic). For R9, `validated["pattern_description"]` (already
+    validated case output, never re-derived) supplies the "how". The
+    verdict sentence below is always literally `validated["verdict"]` --
+    never a hardcoded assumption about what that verdict must be (G13
+    review fix).
+    """
+    combined = (ledger.get("full_evidence") or {}).get("combined_evidence") or {}
+    customer_id = (combined.get("customer") or {}).get("customer_id")
+    card_key = (combined.get("card") or {}).get("card_key")
+    pattern = validated.get("pattern")
+    exposure = validated.get("exposure_usd")
+    affected = validated.get("affected_txn_ids") or []
+
+    sentences: list[str] = []
+
+    if customer_id and card_key:
+        sentences.append(f"This report concerns customer {customer_id}, card {card_key}.")
+    elif card_key:
+        sentences.append(f"This report concerns card {card_key}.")
+    elif customer_id:
+        sentences.append(f"This report concerns customer {customer_id}.")
+
+    sentences.append(
+        f"The investigation's reasoning layer reached a '{validated.get('verdict')}' verdict "
+        f"with a fraud probability of {validated.get('fraud_probability')}."
+    )
+
+    if affected and exposure is not None:
+        sentences.append(f"{len(affected)} transaction(s) were identified as part of this episode, totaling ${exposure}.")
+    elif exposure is not None:
+        sentences.append(f"The total exposure identified is ${exposure}.")
+
+    if pattern and pattern != "none":
+        sentences.append(f"The identified pattern is {pattern}.")
+
+    if case.get("first_suspicious_txn_id"):
+        sentences.append(f"The earliest transaction identified as part of this episode is {case['first_suspicious_txn_id']}.")
+
+    dates = _sar_activity_dates(ledger, validated)
+    if dates:
+        if dates[0] == dates[1]:
+            sentences.append(f"The activity occurred on {dates[0]}.")
+        else:
+            sentences.append(f"The activity occurred between {dates[0]} and {dates[1]}.")
+
+    region = (combined.get("billing_region") or {}).get("addr1")
+    if region is not None:
+        sentences.append(f"The flagged transaction is billed in region {region}.")
+
+    if pattern == "card_testing":
+        sentences.append(
+            "The pattern matches card testing: several small online authorizations preceded a "
+            "strictly larger purchase on the same card."
+        )
+    elif pattern == "undocumented" and validated.get("pattern_description"):
+        sentences.append(validated["pattern_description"])
+
+    sentences.append(f"{file_report_reason.rstrip('.')}.")
+
+    # G13 review fix: gated on real evidence (_sar_connected_card_keys
+    # actually returning something), never on parsing file_report_reason
+    # for "R6" -- applies equally to R6 and R9, whose cross-customer
+    # evidence is a strict subset of R6's own.
+    connected = _sar_connected_card_keys(ledger)
+    if connected:
+        shown = connected[:_SAR_MAX_NAMED_CONNECTED_CARDS]
+        more = ", and others" if len(connected) > _SAR_MAX_NAMED_CONNECTED_CARDS else ""
+        sentences.append(f"{len(connected)} other card(s) sharing this element already show confirmed fraud: {', '.join(shown)}{more}.")
+
+    similar = case.get("similar_prior_cases") or []
+    if similar:
+        shown = similar[:5]
+        more = ", and others" if len(similar) > 5 else ""
+        sentences.append(f"This activity resembles {len(similar)} previously closed fraud case(s): {', '.join(shown)}{more}.")
+
+    if case.get("summary"):
+        sentences.append(case["summary"])
+
+    return " ".join(sentences[:12])
+
+
+def _build_sar(ledger: dict, case: dict, validated: dict, next_best_actions_final: list[dict]) -> dict:
+    """Organizer README Part 2 (`sar`). `file`/`reason` are read directly
+    from the FILE_REPORT entry in `next_best_actions_final`, if any --
+    must agree with whether FILE_REPORT appears there (organizer's own
+    field definition), never re-decided here. When absent, returns the
+    organizer's exact required empty shape. When present, `narrative`/
+    `subjects`/`total_amount_usd`/`activity_dates` are built
+    deterministically from data already computed above -- no new graph
+    or LLM call.
+    """
+    file_report = next((a for a in next_best_actions_final if a.get("action") == "FILE_REPORT"), None)
+    if file_report is None:
+        return dict(_EMPTY_SAR)
+
+    reason = file_report.get("reason", "")
+    return {
+        "file": True,
+        "reason": reason,
+        "narrative": _sar_narrative(ledger, validated, case, reason),
+        "subjects": _sar_subjects(ledger, reason),
+        "total_amount_usd": validated.get("exposure_usd", 0),
+        "activity_dates": _sar_activity_dates(ledger, validated),
+    }
+
+
+def _stop_reason_for_success(ledger: dict, validated: dict, evidence_requested: bool) -> str:
     """Organizer README, Answer Format top-level fields: `stop_reason` --
     "Why the investigation ended here." Built only from vocabulary this
     project already established (G1's own `recommendation` values and
     the reasoning layer's own validated `verdict`) -- no new semantic
-    meaning invented for this field. This phase has no evidence-request/
-    response loop (see spec Section 13), so "further steps" always means
-    "none were taken," stated plainly rather than implying a loop ran.
+    meaning invented for this field. `evidence_requested` is the G12
+    evidence-request loop's own honest signal (src.agent.evidence_loop)
+    of whether it found a policy-relevant gap for this case -- never
+    invented here.
     """
+    loop_note = (
+        "One evidence request was simulated and its assumed response applied to the final "
+        "next-best-action recommendation (see evidence_requests)."
+        if evidence_requested
+        else "No evidence-request gap existed, so no further steps were taken."
+    )
     return (
         f"G1 investigation completed (recommendation: {ledger.get('recommendation')}); "
         f"the reasoning layer produced a validated '{validated['verdict']}' verdict from the "
-        "evidence gathered. No evidence-request loop exists in this phase, so no further "
-        "steps were taken."
+        f"evidence gathered. {loop_note}"
     )
 
 
@@ -364,10 +602,21 @@ async def investigate_and_assemble(
     # in this module.
     g2_result_final = g2_policy.evaluate(ledger, validated)
 
+    # G12: evidence-request / simulated-response loop -- runs only after
+    # both the LLM call and validation succeeded, over the SAME
+    # post-reasoning G2 pass just computed above. Adds no graph/LLM call
+    # of its own; see src.agent.evidence_loop.apply.
+    evidence_outcome = evidence_loop.apply(ledger, validated, g2_result_final)
+
+    case = assemble_case(ledger, g2_result, validated)
+    next_best_actions = _next_best_actions(g2_result, evidence_outcome["g2_result"])
+
     return {
         "ok": True,
-        "case": assemble_case(ledger, g2_result, validated),
-        "next_best_actions": _next_best_actions(g2_result, g2_result_final),
+        "case": case,
+        "evidence_requests": evidence_outcome["evidence_requests"],
+        "next_best_actions": next_best_actions,
+        "sar": _build_sar(ledger, case, validated, next_best_actions["final"]),
         "stripped_ids": validated.get("stripped_ids", []),
-        "stop_reason": _stop_reason_for_success(ledger, validated),
+        "stop_reason": _stop_reason_for_success(ledger, validated, bool(evidence_outcome["evidence_requests"])),
     }
