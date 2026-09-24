@@ -237,6 +237,18 @@ def test_defaults_are_explicit_constants_including_required_model():
     assert gp.DEFAULT_MAX_OUTPUT_TOKENS > 0
 
 
+def test_default_max_output_tokens_raised_after_real_hhg011_failure():
+    # G11-G: real HHG-011 diagnostic (G11-F) confirmed prompt_chars=140570
+    # (~35,142 estimated tokens) failed with only a 2048-token output
+    # budget (400 json_validate_failed, failed_generation_len=0). Raised
+    # to 4096, matching the same category of fix already proven correct
+    # for Gemini (1024 -> 4096). Pins the exact value so a future change
+    # can't silently regress back toward the value that failed on a real
+    # case, without at least being a deliberate, visible edit here.
+    assert gp.DEFAULT_MAX_OUTPUT_TOKENS == 4096
+    assert gp.DEFAULT_MAX_OUTPUT_TOKENS > 2048  # strictly above the value that actually failed
+
+
 def test_request_uses_exact_specified_response_format_shape(monkeypatch):
     fake_cls = _make_fake_client_class(response_text=json.dumps(_VALID_RESPONSE_BODY))
     monkeypatch.setattr(groq_module, "AsyncGroq", fake_cls)
@@ -363,3 +375,171 @@ def test_module_never_prints_or_logs_anything():
     assert "print(" not in source
     assert "logging." not in source
     assert "logger." not in source
+
+
+# --- G11-F: HHG-011 failure diagnostics (prompt size, Groq error body) ---
+# Real HHG-011 finding: a 400 json_validate_failed with an empty
+# failed_generation gave no way to tell prompt size/output budget apart
+# from any other cause. These tests prove the provider now preserves
+# that context instead of discarding it, exactly as _diagnose_call_
+# failure's own docstring describes -- and never for any other reason.
+
+def _real_bad_request_error(error_body: dict) -> "groq.BadRequestError":
+    import httpx
+    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    response = httpx.Response(400, request=request, content=json.dumps(error_body).encode())
+    return groq_module.BadRequestError(f"Error code: 400 - {error_body}", response=response, body=error_body)
+
+
+_REAL_HHG011_ERROR_BODY = {
+    "error": {
+        "message": "Failed to validate JSON. Please adjust your prompt. See 'failed_generation' for more details.",
+        "type": "invalid_request_error",
+        "code": "json_validate_failed",
+        "failed_generation": "",
+    }
+}
+
+
+def test_bad_request_error_diagnostic_includes_prompt_length():
+    fake_cls = _make_fake_client_class(exception=_real_bad_request_error(_REAL_HHG011_ERROR_BODY))
+    call_llm = _call_llm_with_fake_client(fake_cls)
+    long_prompt = "x" * 140_570  # matches the real HHG-011 compacted prompt size measured earlier this project
+    with pytest.raises(RuntimeError) as exc_info:
+        run(call_llm(long_prompt))
+    message = str(exc_info.value)
+    assert "prompt_chars=140570" in message
+    assert "estimated_prompt_tokens~=35142" in message  # 140570 // 4, disclosed as an estimate
+
+
+def test_bad_request_error_diagnostic_includes_configured_max_output_tokens():
+    fake_cls = _make_fake_client_class(exception=_real_bad_request_error(_REAL_HHG011_ERROR_BODY))
+    original_client = groq_module.AsyncGroq
+    groq_module.AsyncGroq = fake_cls
+    try:
+        call_llm = gp.make_groq_call_llm(api_key="test-fake-key", max_output_tokens=777)
+        with pytest.raises(RuntimeError) as exc_info:
+            run(call_llm("prompt"))
+    finally:
+        groq_module.AsyncGroq = original_client
+    assert "max_output_tokens=777" in str(exc_info.value)
+
+
+def test_bad_request_error_diagnostic_includes_status_code_and_error_type():
+    fake_cls = _make_fake_client_class(exception=_real_bad_request_error(_REAL_HHG011_ERROR_BODY))
+    call_llm = _call_llm_with_fake_client(fake_cls)
+    with pytest.raises(RuntimeError) as exc_info:
+        run(call_llm("prompt"))
+    message = str(exc_info.value)
+    assert "status_code=400" in message
+    assert "BadRequestError" in message
+
+
+def test_bad_request_error_diagnostic_includes_groq_error_body_fields():
+    fake_cls = _make_fake_client_class(exception=_real_bad_request_error(_REAL_HHG011_ERROR_BODY))
+    call_llm = _call_llm_with_fake_client(fake_cls)
+    with pytest.raises(RuntimeError) as exc_info:
+        run(call_llm("prompt"))
+    message = str(exc_info.value)
+    assert "groq_error_type=invalid_request_error" in message
+    assert "groq_error_code=json_validate_failed" in message
+    assert "groq_error_message=Failed to validate JSON" in message
+
+
+def test_bad_request_error_diagnostic_includes_failed_generation_length_and_content():
+    error_body = dict(_REAL_HHG011_ERROR_BODY)
+    error_body["error"] = dict(error_body["error"])
+    error_body["error"]["failed_generation"] = '{"verdict": "frau'  # non-empty, to prove content is captured too
+    fake_cls = _make_fake_client_class(exception=_real_bad_request_error(error_body))
+    call_llm = _call_llm_with_fake_client(fake_cls)
+    with pytest.raises(RuntimeError) as exc_info:
+        run(call_llm("prompt"))
+    message = str(exc_info.value)
+    assert "failed_generation_len=17" in message
+    assert "failed_generation='{\"verdict\": \"frau'" in message
+
+
+def test_bad_request_error_diagnostic_captures_empty_failed_generation_exactly_as_observed():
+    # The REAL HHG-011 shape: failed_generation is present but empty --
+    # must be reported as length 0, not omitted or confused with "absent".
+    fake_cls = _make_fake_client_class(exception=_real_bad_request_error(_REAL_HHG011_ERROR_BODY))
+    call_llm = _call_llm_with_fake_client(fake_cls)
+    with pytest.raises(RuntimeError) as exc_info:
+        run(call_llm("prompt"))
+    assert "failed_generation_len=0" in str(exc_info.value)
+
+
+def test_bad_request_error_diagnostic_captures_unknown_extra_error_fields_generically():
+    error_body = {
+        "error": {
+            "message": "some future error",
+            "type": "invalid_request_error",
+            "code": "json_validate_failed",
+            "failed_generation": "",
+            "usage": {"completion_tokens": 42},  # a field this code doesn't know about today
+        }
+    }
+    fake_cls = _make_fake_client_class(exception=_real_bad_request_error(error_body))
+    call_llm = _call_llm_with_fake_client(fake_cls)
+    with pytest.raises(RuntimeError) as exc_info:
+        run(call_llm("prompt"))
+    assert "additional_error_fields=" in str(exc_info.value)
+    assert "completion_tokens" in str(exc_info.value)
+
+
+def test_diagnostic_does_not_break_for_exceptions_without_status_code_or_body():
+    # Every pre-existing test in this file raises a plain Exception/
+    # ConnectionError with no .status_code/.body -- getattr(..., None)
+    # throughout must keep this working exactly as before.
+    fake_cls = _make_fake_client_class(exception=ConnectionError("upstream connection reset"))
+    call_llm = _call_llm_with_fake_client(fake_cls)
+    with pytest.raises(RuntimeError, match="upstream connection reset"):
+        run(call_llm("prompt"))
+
+
+def test_diagnostic_message_is_scrubbed_for_secrets(monkeypatch):
+    fake_key = "gsk_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789ABCDEFGHIJKLM"
+    monkeypatch.setenv("GROQ_API_KEY", fake_key)
+    error_body = {
+        "error": {
+            "message": f"invalid key {fake_key} rejected",
+            "type": "invalid_request_error",
+            "code": "json_validate_failed",
+            "failed_generation": "",
+        }
+    }
+    fake_cls = _make_fake_client_class(exception=_real_bad_request_error(error_body))
+    call_llm = _call_llm_with_fake_client(fake_cls, api_key=fake_key)
+    with pytest.raises(RuntimeError) as exc_info:
+        run(call_llm("prompt"))
+    message = str(exc_info.value)
+    assert fake_key not in message
+    assert "[REDACTED]" in message
+
+
+def test_diagnostic_does_not_log_or_persist_the_full_prompt_content():
+    fake_cls = _make_fake_client_class(exception=_real_bad_request_error(_REAL_HHG011_ERROR_BODY))
+    call_llm = _call_llm_with_fake_client(fake_cls)
+    distinctive_prompt = "UNIQUE_MARKER_" + ("y" * 1000)
+    with pytest.raises(RuntimeError) as exc_info:
+        run(call_llm(distinctive_prompt))
+    # only the length is reported -- the prompt's actual text never appears
+    assert distinctive_prompt not in str(exc_info.value)
+    assert "UNIQUE_MARKER_" not in str(exc_info.value)
+
+
+def test_success_path_unaffected_by_diagnostic_addition():
+    fake_cls = _make_fake_client_class(response_text=json.dumps(_VALID_RESPONSE_BODY))
+    call_llm = _call_llm_with_fake_client(fake_cls)
+    result = run(call_llm("prompt"))
+    assert json.loads(result) == _VALID_RESPONSE_BODY
+
+
+def test_no_retries_still_holds_with_diagnostic_addition():
+    fake_cls = _make_fake_client_class(exception=_real_bad_request_error(_REAL_HHG011_ERROR_BODY))
+    call_llm = _call_llm_with_fake_client(fake_cls)
+    try:
+        run(call_llm("prompt"))
+    except RuntimeError:
+        pass
+    assert len(fake_cls.calls) == 1
