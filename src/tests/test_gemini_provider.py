@@ -37,25 +37,31 @@ _VALID_RESPONSE_BODY = {
 }
 
 
-def _make_fake_client_class(response_text=None, exception=None):
+def _make_fake_client_class(response_text=None, exception=None, candidates=None, usage_metadata=None):
     """Returns a fake replacement for google.genai.Client whose
     .aio.models.generate_content(...) either returns a fixed response
     (an object with a .text attribute, matching the real SDK's return
     shape) or raises a given exception -- and records every call it
-    received for assertions.
+    received for assertions. `candidates`/`usage_metadata` are optional
+    and default to None (matching every pre-existing call site here, all
+    of which only ever set .text) -- they exist only for the G11-C
+    diagnostic tests below, which need a response shaped like the real
+    SDK's finish_reason/usage_metadata fields.
     """
     calls = []
 
     class _FakeResponse:
-        def __init__(self, text):
+        def __init__(self, text, candidates=None, usage_metadata=None):
             self.text = text
+            self.candidates = candidates
+            self.usage_metadata = usage_metadata
 
     class _FakeModels:
         async def generate_content(self, model, contents, config):
             calls.append({"model": model, "contents": contents, "config": config})
             if exception is not None:
                 raise exception
-            return _FakeResponse(response_text)
+            return _FakeResponse(response_text, candidates=candidates, usage_metadata=usage_metadata)
 
     class _FakeAio:
         def __init__(self):
@@ -345,3 +351,134 @@ def test_module_never_prints_or_logs_anything():
     assert "print(" not in source
     assert "logging." not in source
     assert "logger." not in source
+
+
+# --- G11-C: parse-failure diagnostics (finish_reason, usage_metadata, raw text) ---
+# Real HHG-001 finding: all 20 real cases failed identically with
+# "Unterminated string starting at: line 1 column 357 (char 356)" and
+# call_error/raw_response gave no way to tell truncation-by-max-tokens
+# apart from a safety block or any other cause. These tests prove the
+# provider now preserves that information instead of discarding it.
+
+from google.genai import types as _genai_types  # noqa: E402 -- same real SDK types.py imports, confirmed below
+
+
+def test_diagnostic_message_preserves_raw_truncated_text(monkeypatch):
+    truncated = '{"verdict": "frau'  # deliberately cut mid-string, like the real failure
+    fake_cls = _make_fake_client_class(response_text=truncated)
+    call_llm = _call_llm_with_fake_client(fake_cls, monkeypatch)
+    with pytest.raises(json.JSONDecodeError) as exc_info:
+        run(call_llm("prompt"))
+    assert truncated in str(exc_info.value)
+
+
+def test_diagnostic_message_includes_real_sdk_finish_reason_enum_value(monkeypatch):
+    from types import SimpleNamespace
+    candidate = SimpleNamespace(finish_reason=_genai_types.FinishReason.MAX_TOKENS, finish_message=None)
+    fake_cls = _make_fake_client_class(response_text='{"verdict": "frau', candidates=[candidate])
+    call_llm = _call_llm_with_fake_client(fake_cls, monkeypatch)
+    with pytest.raises(json.JSONDecodeError) as exc_info:
+        run(call_llm("prompt"))
+    assert "finish_reason=MAX_TOKENS" in str(exc_info.value)
+
+
+def test_diagnostic_message_includes_usage_metadata_token_counts(monkeypatch):
+    from types import SimpleNamespace
+    usage = SimpleNamespace(
+        prompt_token_count=58000, candidates_token_count=4096,
+        thoughts_token_count=4090, total_token_count=62096,
+    )
+    fake_cls = _make_fake_client_class(response_text='{"verdict": "frau', usage_metadata=usage)
+    # a short, distinctive api_key: below scrub_secret's 3-char fragment
+    # threshold, so it can't collide with substrings of the diagnostic
+    # field names themselves (e.g. the default "test-fake-key" fixture
+    # value shares "tes" with "candidates", which scrub_secret's
+    # fragment-matching would otherwise redact -- a fixture collision,
+    # not a bug in the diagnostic code).
+    call_llm = _call_llm_with_fake_client(fake_cls, monkeypatch, api_key="ab")
+    with pytest.raises(json.JSONDecodeError) as exc_info:
+        run(call_llm("prompt"))
+    message = str(exc_info.value)
+    assert "prompt_token_count=58000" in message
+    assert "candidates_token_count=4096" in message
+    assert "thoughts_token_count=4090" in message
+    assert "total_token_count=62096" in message
+
+
+def test_diagnostic_message_handles_missing_candidates_and_usage_gracefully(monkeypatch):
+    # matches the ORIGINAL _FakeResponse shape used by every other test in
+    # this file: no .candidates/.usage_metadata at all, exactly like a
+    # bare object with only .text -- must not crash.
+    fake_cls = _make_fake_client_class(response_text='{"verdict": "frau')
+    call_llm = _call_llm_with_fake_client(fake_cls, monkeypatch)
+    with pytest.raises(json.JSONDecodeError) as exc_info:
+        run(call_llm("prompt"))
+    message = str(exc_info.value)
+    assert "finish_reason=None" in message
+    assert "usage_metadata=(unavailable)" in message
+
+
+def test_diagnostic_message_still_reports_the_original_parse_position(monkeypatch):
+    fake_cls = _make_fake_client_class(response_text='{"verdict": "frau')
+    call_llm = _call_llm_with_fake_client(fake_cls, monkeypatch)
+    with pytest.raises(json.JSONDecodeError) as exc_info:
+        run(call_llm("prompt"))
+    assert "char" in str(exc_info.value)  # the standard JSONDecodeError position suffix is preserved
+
+
+def test_diagnostic_message_is_scrubbed_for_secrets_in_raw_text(monkeypatch):
+    fake_key = "AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe"
+    truncated_with_key = f'{{"verdict": "the key is {fake_key} and then it cuts off'
+    fake_cls = _make_fake_client_class(response_text=truncated_with_key)
+    call_llm = _call_llm_with_fake_client(fake_cls, monkeypatch, api_key=fake_key)
+    with pytest.raises(json.JSONDecodeError) as exc_info:
+        run(call_llm("prompt"))
+    message = str(exc_info.value)
+    assert fake_key not in message
+    assert "[REDACTED]" in message
+
+
+def test_diagnostic_failure_still_flows_into_existing_llm_call_failed_path(monkeypatch):
+    # end-to-end: reasoning.get_llm_reasoning's own generic except-Exception
+    # still classifies this the same way as before -- the richer message
+    # changes only what's inside `detail`, never the failure_reason.
+    from types import SimpleNamespace
+    candidate = SimpleNamespace(finish_reason=_genai_types.FinishReason.MAX_TOKENS, finish_message=None)
+    fake_cls = _make_fake_client_class(response_text='{"verdict": "frau', candidates=[candidate])
+    call_llm = _call_llm_with_fake_client(fake_cls, monkeypatch)
+    outcome = run(reasoning.get_llm_reasoning(_base_evidence_package(), call_llm=call_llm))
+    assert outcome["ok"] is False
+    assert outcome["failure_reason"] == "llm_call_failed"
+    assert "MAX_TOKENS" in outcome["detail"]
+
+
+def test_diagnose_parse_failure_helper_direct(monkeypatch):
+    from types import SimpleNamespace
+    response = SimpleNamespace(
+        candidates=[SimpleNamespace(finish_reason=_genai_types.FinishReason.SAFETY, finish_message="blocked")],
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=10, candidates_token_count=5,
+            thoughts_token_count=0, total_token_count=15,
+        ),
+    )
+    try:
+        json.loads("not json")
+    except json.JSONDecodeError as parse_error:
+        message = gp._diagnose_parse_failure("not json", response, parse_error)
+    assert "finish_reason=SAFETY" in message
+    assert "finish_message='blocked'" in message
+    assert "prompt_token_count=10" in message
+    assert "raw_text='not json'" in message
+
+
+def test_genai_types_finish_reason_and_usage_metadata_field_names_are_real():
+    # Anchors this module's assumed SDK attribute names against the
+    # actually-installed google-genai SDK -- if a future SDK upgrade
+    # renames these, this test (not a live Gemini call) catches it.
+    assert "finish_reason" in _genai_types.Candidate.model_fields
+    assert "finish_message" in _genai_types.Candidate.model_fields
+    usage_fields = _genai_types.GenerateContentResponseUsageMetadata.model_fields
+    assert "prompt_token_count" in usage_fields
+    assert "candidates_token_count" in usage_fields
+    assert "thoughts_token_count" in usage_fields
+    assert "total_token_count" in usage_fields

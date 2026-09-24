@@ -66,8 +66,55 @@ def make_gemini_call_llm(
             raise RuntimeError("Gemini returned an empty response")
 
         # Validate that the provider actually returned JSON before handing
-        # it to the existing reasoning/validation layer.
-        json.loads(text)
+        # it to the existing reasoning/validation layer. On failure, the
+        # raised exception's type is kept as json.JSONDecodeError (same as
+        # before) so callers that distinguish it are unaffected -- only
+        # its message is enriched with the diagnostics below, since the
+        # existing call sites (reasoning.py, g9_runner.py) surface only
+        # str(exception) and are not modified here.
+        try:
+            json.loads(text)
+        except json.JSONDecodeError as e:
+            raise json.JSONDecodeError(
+                scrub_secret(_diagnose_parse_failure(text, response, e)), text, e.pos,
+            ) from None
         return text
 
     return call_llm
+
+
+def _diagnose_parse_failure(text: str, response, parse_error: json.JSONDecodeError) -> str:
+    """Builds a diagnostic message for a response that failed the JSON
+    self-check above -- preserving the actual (truncated) response text
+    and the two SDK-provided signals that explain *why* generation ended
+    (finish_reason: STOP/MAX_TOKENS/SAFETY/etc., and usage_metadata's
+    token accounting, including thoughts_token_count for models that
+    consume part of the output budget on internal reasoning). Field
+    names (candidates[].finish_reason/finish_message,
+    usage_metadata.prompt_token_count/candidates_token_count/
+    thoughts_token_count/total_token_count) were confirmed against the
+    installed google-genai SDK's actual response model fields
+    (google.genai.types.Candidate / GenerateContentResponseUsageMetadata),
+    not guessed.
+    """
+    candidates = getattr(response, "candidates", None) or []
+    finish_reason = getattr(candidates[0], "finish_reason", None) if candidates else None
+    finish_message = getattr(candidates[0], "finish_message", None) if candidates else None
+    finish_reason_value = getattr(finish_reason, "value", finish_reason)
+
+    usage = getattr(response, "usage_metadata", None)
+    if usage is not None:
+        usage_str = (
+            f"prompt_token_count={getattr(usage, 'prompt_token_count', None)} "
+            f"candidates_token_count={getattr(usage, 'candidates_token_count', None)} "
+            f"thoughts_token_count={getattr(usage, 'thoughts_token_count', None)} "
+            f"total_token_count={getattr(usage, 'total_token_count', None)}"
+        )
+    else:
+        usage_str = "unavailable"
+
+    return (
+        f"{parse_error.msg} "
+        f"finish_reason={finish_reason_value} finish_message={finish_message!r} "
+        f"usage_metadata=({usage_str}) raw_text={text!r}"
+    )

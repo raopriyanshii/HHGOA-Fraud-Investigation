@@ -59,6 +59,7 @@ from src.agent import case_output as co
 from src.agent import case_writer
 from src.agent import workflow as wf
 from src.agent.reasoning import CallLLM
+from src.benchmark import submission_adapter as sub
 from src.graph.tigergraph_connection import scrub_secret
 from src.mcp_server.server import mcp
 from src.policy import g2_policy as g2
@@ -312,6 +313,7 @@ async def run_all_cases(
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     case_ids: list[str] | None = None,
     write_call_tool=None,
+    submission_dir: Path | None = None,
 ) -> dict:
     """Runs every row in case_pack_path (or only `case_ids`, if given) --
     a single case's failure (G1, G2, LLM/validator, or G10 graph write)
@@ -320,6 +322,19 @@ async def run_all_cases(
     output_dir. `write_call_tool` is threaded through to
     run_single_case unchanged (defaults to the real MCP dispatch; tests
     inject a fake).
+
+    G11-B integration: if `submission_dir` is given, the SAME final
+    per-case result dict (after G10's written_to_graph/graph_case_id/
+    graph_write fields are already merged in) is additionally passed,
+    unmodified, through src.benchmark.submission_adapter to produce the
+    organizer-required submission file at
+    submission_dir/<case_id>.json. This performs no investigation, LLM,
+    or TigerGraph call of its own -- it is a pure in-memory reshape of
+    data already computed above. `submission_dir` defaults to None
+    (skip) rather than the real repository `cases/` folder so that
+    calling this function -- as every existing and new test in this
+    project does -- never writes into the real repository; only main()
+    below opts into the real default.
     """
     rows = _load_case_pack(case_pack_path)
     if case_ids is not None:
@@ -348,6 +363,8 @@ async def run_all_cases(
             }
         results.append(result)
         _write_json(output_dir / "case_results" / f"{case_id}.json", result)
+        if submission_dir is not None:
+            sub.write_submission_file(result, output_dir=submission_dir)
 
     total_runtime_s = time.perf_counter() - run_t0
     summary = _build_summary(results, total_runtime_s)
@@ -372,6 +389,7 @@ def main() -> None:
     parser.add_argument("--case", action="append", dest="cases", default=None, help="restrict to one case_id (repeatable)")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--case-pack", type=Path, default=DEFAULT_CASE_PACK_PATH)
+    parser.add_argument("--submission-dir", type=Path, default=sub.DEFAULT_SUBMISSION_DIR)
     args = parser.parse_args()
 
     call_llm = _build_call_llm(args.provider)
@@ -380,6 +398,7 @@ def main() -> None:
         case_pack_path=args.case_pack,
         output_dir=args.output_dir,
         case_ids=args.cases,
+        submission_dir=args.submission_dir,
     ))
     print(json.dumps(outcome["summary"], indent=2, default=str))
 
