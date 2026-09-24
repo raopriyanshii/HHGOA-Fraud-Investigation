@@ -14,6 +14,11 @@ pipeline exactly as it exists:
                                       -- G7/G8: evidence package -> ONE real
                                         LLM call -> deterministic validator
                                         -> case object / next_best_actions
+  case_writer.write_case_memory()    -- G10: the SAME outcome object, if and
+                                        only if it succeeded, persisted via
+                                        the one existing MCP write tool --
+                                        never a second reasoning step, never
+                                        a second LLM call
 
 The runner adds only:
   - iteration over the 20 case_pack rows
@@ -23,15 +28,22 @@ The runner adds only:
     it forwards to the real call_llm unchanged and adds no additional
     call, no retry, and no timeout of its own (the existing
     reasoning.DEFAULT_LLM_TIMEOUT_S, 60s, applies exactly as before)
+  - a real MCP dispatcher scoped to exactly the one G10 write tool
+    (_real_write_call_tool), mirroring workflow._default_call_tool's own
+    contract, for the same reason (zero live dependency in tests)
   - JSON artifact writing (outputs/case_results/<CASE_ID>.json,
-    outputs/evaluation_summary.json)
-  - per-case exception isolation, so one case's failure (G1, G2, or LLM)
-    never stops the remaining 19 cases
+    outputs/evaluation_summary.json), now including written_to_graph/
+    graph_case_id/graph_write alongside the fields already written
+  - per-case exception isolation, so one case's failure (G1, G2, LLM, or
+    G10 graph write) never stops the remaining 19 cases
 
-Never calls TigerGraph directly and never bypasses MCP: the only path to
-graph data is workflow.investigate()'s own call_tool, which defaults to
-the real MCP dispatch (src.agent.workflow._default_call_tool ->
-src.mcp_server.server.mcp.call_tool) exactly as G1 already established.
+Never calls TigerGraph directly and never bypasses MCP: the only paths to
+graph data are workflow.investigate()'s own call_tool (defaults to the
+real MCP dispatch, src.agent.workflow._default_call_tool ->
+src.mcp_server.server.mcp.call_tool, exactly as G1 already established)
+and _real_write_call_tool below, which is hard-scoped to the single
+literal tool name "write_case_memory" and can never become a
+general-purpose mutation dispatcher.
 """
 from __future__ import annotations
 
@@ -41,12 +53,14 @@ import csv
 import json
 import time
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from src.agent import case_output as co
+from src.agent import case_writer
 from src.agent import workflow as wf
 from src.agent.reasoning import CallLLM
 from src.graph.tigergraph_connection import scrub_secret
+from src.mcp_server.server import mcp
 from src.policy import g2_policy as g2
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -71,6 +85,54 @@ def _load_case_pack(case_pack_path: Path) -> list[dict]:
         return list(csv.DictReader(f))
 
 
+# G10 integration: a NOT-attempted result, used whenever the investigation
+# itself didn't succeed -- the writer is never invoked in that case (see
+# run_single_case below), so this is the one, fixed shape reported instead.
+_GRAPH_WRITE_NOT_ATTEMPTED = {
+    "attempted": False,
+    "written_to_graph": False,
+    "graph_case_id": "",
+    "reason": "investigation_not_successful",
+    "detail": None,
+    "steps": None,
+}
+
+
+async def _real_write_call_tool(name: str, arguments: dict) -> tuple[bool, Any, str | None]:
+    """Real MCP dispatch for src.agent.case_writer's one write call --
+    mirrors src.agent.workflow._default_call_tool's exact (ok, value,
+    error) contract and never-raises guarantee, scoped ONLY to the
+    single G10 write tool. `name` is never constructed from data --
+    the one call site below always passes the literal string
+    "write_case_memory" -- so this can never become a general-purpose
+    TigerGraph mutation dispatcher.
+    """
+    if name != "write_case_memory":
+        raise ValueError(f"tool {name!r} is not the G10 write tool this dispatcher is scoped to")
+    try:
+        result = await mcp.call_tool(name, arguments)
+    except Exception as e:
+        return False, None, scrub_secret(str(e))
+    if result.is_error:
+        text_parts = [getattr(c, "text", "") for c in (result.content or [])]
+        message = " ".join(p for p in text_parts if p) or f"{name} returned an error"
+        return False, None, scrub_secret(message)
+    sc = result.structured_content
+    if sc is not None:
+        value = sc.get("result") if isinstance(sc, dict) and "result" in sc else sc
+    else:
+        # Some MCP SDK return-type shapes only populate the text content
+        # block, not structured_content -- confirmed empirically during
+        # G10's own live verification. Parse that instead of losing the
+        # result.
+        text_parts = [getattr(c, "text", "") for c in (result.content or [])]
+        try:
+            value = json.loads("".join(text_parts)) if text_parts else None
+        except json.JSONDecodeError:
+            value = None
+    return True, value, None
+
+
 def _make_recording_call_llm(call_llm: CallLLM) -> tuple[CallLLM, dict]:
     """Wraps a real CallLLM purely for audit capture. Forwards to
     `call_llm` unchanged, adds no additional call, no retry, and no
@@ -93,7 +155,7 @@ def _make_recording_call_llm(call_llm: CallLLM) -> tuple[CallLLM, dict]:
     return wrapped, record
 
 
-async def run_single_case(case_id: str, call_llm: CallLLM) -> dict:
+async def run_single_case(case_id: str, call_llm: CallLLM, *, write_call_tool=None) -> dict:
     """Runs the existing, unmodified pipeline for one case_id trigger.
     Exactly one LLM call is made if G1/G2 succeed (case_output.
     investigate_and_assemble's own existing guarantee, unchanged here).
@@ -101,8 +163,22 @@ async def run_single_case(case_id: str, call_llm: CallLLM) -> dict:
     (run_all_cases) is responsible for per-case exception isolation, so
     this function itself stays a direct, unmodified reflection of the
     real pipeline for anyone testing it in isolation.
+
+    G10 integration (added here, the smallest point available): once
+    `outcome` exists, if and ONLY if the investigation itself succeeded
+    (outcome["ok"]), the already-implemented, already-tested
+    src.agent.case_writer.write_case_memory is invoked exactly once,
+    with the SAME outcome object -- no new field mapping, no second
+    reasoning step, no additional LLM call. On any G9 failure, the
+    writer is never invoked at all (not even case_writer's own internal
+    short-circuit is relied on here -- the gate is explicit, at this
+    call site, so "the writer was never called" is trivially true, not
+    just structurally guaranteed one layer down). `write_call_tool`
+    defaults to the real MCP dispatch (_real_write_call_tool); tests
+    inject a fake to avoid any live TigerGraph/MCP dependency.
     """
     recording_call_llm, record = _make_recording_call_llm(call_llm)
+    write_call_tool = write_call_tool or _real_write_call_tool
 
     t0 = time.perf_counter()
     ledger = await wf.investigate({"type": "case_id", "value": case_id})
@@ -113,6 +189,21 @@ async def run_single_case(case_id: str, call_llm: CallLLM) -> dict:
     t2 = time.perf_counter()
     outcome = await co.investigate_and_assemble(ledger, g2_result, call_llm=recording_call_llm)
     t3 = time.perf_counter()
+
+    if outcome.get("ok"):
+        graph_write = await case_writer.write_case_memory(case_id, outcome, call_tool=write_call_tool)
+    else:
+        graph_write = dict(_GRAPH_WRITE_NOT_ATTEMPTED)
+
+    # Mirrors the two fields into outcome["case"] itself, matching the
+    # organizer's own case.written_to_graph/case.graph_case_id fields
+    # (case_output.py is not modified to produce these -- they are
+    # merged in here, additively, onto the dict it already returned).
+    # Every existing key in outcome["case"] is left exactly as
+    # case_output.py produced it.
+    if outcome.get("ok"):
+        outcome["case"]["written_to_graph"] = graph_write["written_to_graph"]
+        outcome["case"]["graph_case_id"] = graph_write["graph_case_id"]
 
     full_evidence = ledger.get("full_evidence") or {}
     combined_evidence = full_evidence.get("combined_evidence") or {}
@@ -136,6 +227,13 @@ async def run_single_case(case_id: str, call_llm: CallLLM) -> dict:
         },
         "outcome": outcome,
         "success": bool(outcome.get("ok")),
+        # G10: always present, regardless of success/failure, so every
+        # case result has a stable location for these two fields --
+        # reasoning success and graph-write success are reported
+        # independently, never conflated.
+        "written_to_graph": graph_write["written_to_graph"],
+        "graph_case_id": graph_write["graph_case_id"],
+        "graph_write": graph_write,
         "timing_s": {
             "g1_evidence": round(t1 - t0, 3),
             "llm_and_validation": round(t3 - t2, 3),
@@ -213,11 +311,15 @@ async def run_all_cases(
     case_pack_path: Path = DEFAULT_CASE_PACK_PATH,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     case_ids: list[str] | None = None,
+    write_call_tool=None,
 ) -> dict:
     """Runs every row in case_pack_path (or only `case_ids`, if given) --
-    a single case's failure (G1, G2, or LLM/validator) is caught and
-    recorded, never stopping the remaining cases. Writes one JSON file
-    per case plus one evaluation_summary.json under output_dir.
+    a single case's failure (G1, G2, LLM/validator, or G10 graph write)
+    is caught and recorded, never stopping the remaining cases. Writes
+    one JSON file per case plus one evaluation_summary.json under
+    output_dir. `write_call_tool` is threaded through to
+    run_single_case unchanged (defaults to the real MCP dispatch; tests
+    inject a fake).
     """
     rows = _load_case_pack(case_pack_path)
     if case_ids is not None:
@@ -230,13 +332,19 @@ async def run_all_cases(
     for row in rows:
         case_id = row["case_id"]
         try:
-            result = await run_single_case(case_id, call_llm)
+            result = await run_single_case(case_id, call_llm, write_call_tool=write_call_tool)
         except Exception as e:
             result = {
                 "case_id": case_id,
                 "success": False,
                 "stage": "runner_exception",
                 "error": scrub_secret(str(e)),
+                # G10: kept present and consistent even on a G1/G2
+                # pipeline exception -- no graph write was ever
+                # attempted, and this is the one, fixed shape reported.
+                "written_to_graph": False,
+                "graph_case_id": "",
+                "graph_write": dict(_GRAPH_WRITE_NOT_ATTEMPTED),
             }
         results.append(result)
         _write_json(output_dir / "case_results" / f"{case_id}.json", result)

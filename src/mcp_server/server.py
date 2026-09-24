@@ -1,15 +1,20 @@
 """
-MCP server exposing the Phase E deterministic investigation queries
-(Q1-Q8) as MCP tools. Every tool is a thin wrapper around the existing,
-already-validated functions in src/investigation/queries.py -- no graph
-logic is reimplemented here, and no LLM/agent/policy code lives in this
-module.
+MCP server exposing the deterministic investigation queries (Q1-Q9) as
+read-only MCP tools, plus exactly one write tool (G10, write_case_memory).
+Every tool is a thin wrapper around an existing, already-validated
+function in src/investigation/queries.py (reads) or
+src/investigation/case_memory.py (the one write) -- no graph logic is
+reimplemented here, and no LLM/agent/policy code lives in this module.
+write_case_memory is a single fixed operation, never generic TigerGraph
+mutation and never arbitrary GSQL; no LLM ever calls it directly (see
+src/agent/case_writer.py, which is the only caller this project builds).
 """
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
 from src.graph.tigergraph_connection import get_connection, scrub_secret
+from src.investigation import case_memory as cm
 from src.investigation import queries as q
 
 mcp = MCPServer(name="fraud-investigation")
@@ -83,6 +88,49 @@ def combined_evidence(flagged_txn_id: int, window_hours: float = 24.0) -> dict |
 def cross_card_fraud_verification(card_key: str) -> dict[str, Any]:
     """Q9: cards sharing a non-hub device or billing region with the given card, each tagged with same_customer and its own confirmed-fraud status."""
     return _safe_call(q.q9_cross_card_fraud_verification, card_key)
+
+
+@mcp.tool()
+def write_case_memory(
+    case_id: str,
+    verdict: str,
+    fraud_probability: float,
+    pattern: str,
+    pattern_description: str,
+    exposure_usd: float,
+    summary: str,
+    stop_reason: str,
+    evidence: list,
+    next_best_actions: dict,
+    affected_txn_ids: list,
+    first_suspicious_txn_id: int | None,
+    similar_prior_cases: list,
+    updated_at: str,
+) -> dict:
+    """G10: the ONLY write-capable tool this server exposes -- a single
+    fixed case-memory operation, never generic TigerGraph mutation and
+    never arbitrary GSQL. Upserts the named HHG_InvestigationCase
+    vertex's content attributes, HHG_INVOLVES edges (affected_txn_ids),
+    and HHG_CITES edges (similar_prior_cases); written_to_graph is only
+    set True after all steps succeed (src.investigation.case_memory's
+    own guarantee, not reimplemented here)."""
+    payload = {
+        "case_id": case_id,
+        "verdict": verdict,
+        "fraud_probability": fraud_probability,
+        "pattern": pattern,
+        "pattern_description": pattern_description,
+        "exposure_usd": exposure_usd,
+        "summary": summary,
+        "stop_reason": stop_reason,
+        "evidence": evidence,
+        "next_best_actions": next_best_actions,
+        "affected_txn_ids": affected_txn_ids,
+        "first_suspicious_txn_id": first_suspicious_txn_id,
+        "similar_prior_cases": similar_prior_cases,
+        "updated_at": updated_at,
+    }
+    return _safe_call(cm.write_investigation_case, payload)
 
 
 if __name__ == "__main__":

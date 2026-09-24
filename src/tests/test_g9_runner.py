@@ -52,6 +52,29 @@ _VALID_LLM_RESPONSE = json.dumps({
 })
 
 
+def _fake_write_call_tool(response=None):
+    """G10 integration: EVERY test in this file must inject one of these
+    (or an equivalent fake) as write_call_tool -- run_single_case's
+    default is the REAL MCP/TigerGraph dispatch, and these tests use the
+    real 20-row case_pack_resolved.csv with real HHG-XXX case_ids. A test
+    that omitted this would perform a genuine write against the live
+    graph with fake test data -- this happened once during development
+    (all 20 real InvestigationCase vertices were briefly overwritten) and
+    was corrected; this helper exists specifically so it cannot happen
+    again from this file.
+    """
+    if response is None:
+        response = {"written": True, "graph_case_id": "TEST-NOT-REAL", "steps": {}}
+    calls = []
+
+    async def call_tool(name, arguments):
+        calls.append((name, arguments))
+        return True, response, None
+
+    call_tool.calls = calls
+    return call_tool
+
+
 def _patch_investigate(monkeypatch, ledger_for=None, raise_for=None):
     """ledger_for(case_id) -> ledger, or a fixed ledger if callable not given.
     raise_for: a set of case_ids for which wf.investigate itself raises.
@@ -86,7 +109,7 @@ def test_runner_processes_all_20_real_case_pack_rows(monkeypatch, tmp_path):
     async def fake_call_llm(prompt):
         return _VALID_LLM_RESPONSE
 
-    outcome = run(g9_runner.run_all_cases(fake_call_llm, output_dir=tmp_path))
+    outcome = run(g9_runner.run_all_cases(fake_call_llm, output_dir=tmp_path, write_call_tool=_fake_write_call_tool()))
     assert outcome["summary"]["total_cases"] == 20
     assert outcome["summary"]["successful_cases"] == 20
     assert len(outcome["results"]) == 20
@@ -104,7 +127,7 @@ def test_one_case_failure_does_not_stop_the_remaining_cases(monkeypatch, tmp_pat
     async def fake_call_llm(prompt):
         return _VALID_LLM_RESPONSE
 
-    outcome = run(g9_runner.run_all_cases(fake_call_llm, output_dir=tmp_path))
+    outcome = run(g9_runner.run_all_cases(fake_call_llm, output_dir=tmp_path, write_call_tool=_fake_write_call_tool()))
     assert outcome["summary"]["total_cases"] == 20
     assert outcome["summary"]["failed_cases"] == 1
     assert outcome["summary"]["successful_cases"] == 19
@@ -127,7 +150,7 @@ def test_exactly_one_llm_call_per_case_no_retries(monkeypatch, tmp_path):
         calls.append(prompt)
         return _VALID_LLM_RESPONSE
 
-    run(g9_runner.run_all_cases(counting_call_llm, case_pack_path=case_pack, output_dir=tmp_path))
+    run(g9_runner.run_all_cases(counting_call_llm, case_pack_path=case_pack, output_dir=tmp_path, write_call_tool=_fake_write_call_tool()))
     assert len(calls) == len(case_ids)  # exactly one per case, no more
 
 
@@ -144,7 +167,7 @@ def test_llm_failure_for_one_case_does_not_trigger_extra_attempts(monkeypatch, t
             raise RuntimeError("simulated transient provider failure")
         return _VALID_LLM_RESPONSE
 
-    outcome = run(g9_runner.run_all_cases(flaky_call_llm, case_pack_path=case_pack, output_dir=tmp_path))
+    outcome = run(g9_runner.run_all_cases(flaky_call_llm, case_pack_path=case_pack, output_dir=tmp_path, write_call_tool=_fake_write_call_tool()))
     assert len(calls) == 2  # exactly one attempt per case -- no retry of the failed one
     assert outcome["summary"]["llm_failures"] == 1
     assert outcome["summary"]["successful_cases"] == 1
@@ -159,7 +182,7 @@ def test_provider_failure_is_recorded_honestly_not_fabricated(monkeypatch, tmp_p
     async def failing_call_llm(prompt):
         raise RuntimeError("503 UNAVAILABLE: model overloaded")
 
-    outcome = run(g9_runner.run_all_cases(failing_call_llm, case_pack_path=case_pack, output_dir=tmp_path))
+    outcome = run(g9_runner.run_all_cases(failing_call_llm, case_pack_path=case_pack, output_dir=tmp_path, write_call_tool=_fake_write_call_tool()))
     result = outcome["results"][0]
     assert result["success"] is False
     assert "case" not in result["outcome"]  # no fabricated case object
@@ -178,7 +201,7 @@ def test_secrets_are_not_serialized_into_case_result_files(monkeypatch, tmp_path
     async def leaking_call_llm(prompt):
         raise RuntimeError(f"401 Unauthorized: key {fake_secret} rejected")
 
-    run(g9_runner.run_all_cases(leaking_call_llm, case_pack_path=case_pack, output_dir=tmp_path))
+    run(g9_runner.run_all_cases(leaking_call_llm, case_pack_path=case_pack, output_dir=tmp_path, write_call_tool=_fake_write_call_tool()))
 
     written = (tmp_path / "case_results" / "HHG-001.json").read_text()
     assert fake_secret not in written
@@ -201,7 +224,7 @@ def test_runner_exception_message_is_scrubbed(monkeypatch, tmp_path):
     async def unreachable_call_llm(prompt):
         raise AssertionError("must not be called if G1 itself failed")
 
-    outcome = run(g9_runner.run_all_cases(unreachable_call_llm, case_pack_path=case_pack, output_dir=tmp_path))
+    outcome = run(g9_runner.run_all_cases(unreachable_call_llm, case_pack_path=case_pack, output_dir=tmp_path, write_call_tool=_fake_write_call_tool()))
     result = outcome["results"][0]
     assert fake_secret not in result["error"]
     assert "[REDACTED]" in result["error"]
@@ -219,8 +242,8 @@ def test_output_is_deterministic_across_repeated_runs_with_identical_llm_output(
     async def fixed_call_llm(prompt):
         return _VALID_LLM_RESPONSE
 
-    outcome_1 = run(g9_runner.run_all_cases(fixed_call_llm, case_pack_path=case_pack, output_dir=tmp_path / "run1"))
-    outcome_2 = run(g9_runner.run_all_cases(fixed_call_llm, case_pack_path=case_pack, output_dir=tmp_path / "run2"))
+    outcome_1 = run(g9_runner.run_all_cases(fixed_call_llm, case_pack_path=case_pack, output_dir=tmp_path / "run1", write_call_tool=_fake_write_call_tool()))
+    outcome_2 = run(g9_runner.run_all_cases(fixed_call_llm, case_pack_path=case_pack, output_dir=tmp_path / "run2", write_call_tool=_fake_write_call_tool()))
 
     case_1 = outcome_1["results"][0]["outcome"]["case"]
     case_2 = outcome_2["results"][0]["outcome"]["case"]
@@ -257,7 +280,7 @@ def test_summary_never_contains_an_accuracy_or_correctness_score(monkeypatch, tm
     async def fake_call_llm(prompt):
         return _VALID_LLM_RESPONSE
 
-    outcome = run(g9_runner.run_all_cases(fake_call_llm, case_pack_path=case_pack, output_dir=tmp_path))
+    outcome = run(g9_runner.run_all_cases(fake_call_llm, case_pack_path=case_pack, output_dir=tmp_path, write_call_tool=_fake_write_call_tool()))
     summary_keys = set(outcome["summary"].keys())
     for forbidden in ("accuracy", "score", "correct", "correctness", "precision", "recall"):
         assert not any(forbidden in k.lower() for k in summary_keys)

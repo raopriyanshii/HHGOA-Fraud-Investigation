@@ -1,0 +1,20 @@
+// G10 schema addition. Purely additive: one new nullable/defaulted
+// attribute on the already-existing HHG_InvestigationCase vertex type.
+// No new vertex type, no new edge type -- HHG_INVOLVES and HHG_CITES
+// already exist (declared in 02_edges.gsql, Phase D) and are reused
+// as-is for affected_txn_ids / similar_prior_cases respectively; see
+// docs/AGENT_WORKFLOW_SPEC.md Section 16 (G10) for the full design
+// rationale (why edges, not JSON, for those two fields).
+//
+// first_suspicious_txn_id mirrors the existing flagged_txn_id UINT
+// column exactly -- same type, same "pointer to one transaction"
+// semantics -- required because the organizer's own Answer Format
+// case.first_suspicious_txn_id field has no existing graph column to
+// land in (confirmed during the G10 audit).
+//
+// Run once, against HHGOA_FraudInvestigation only. Never touches
+// Transaction_Fraud or any other graph.
+
+USE GRAPH HHGOA_FraudInvestigation
+
+ALTER VERTEX HHG_InvestigationCase ADD ATTRIBUTE (first_suspicious_txn_id UINT DEFAULT 0);

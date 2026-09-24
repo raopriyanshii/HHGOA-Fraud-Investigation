@@ -762,3 +762,61 @@ this run. `DEFAULT_MAX_OUTPUT_TOKENS` was raised from 1024 to 4096 during
 this phase after a real HHG-001 attempt produced a JSON-schema-violating
 truncated response at the old value — a disclosed configuration change,
 not an architecture change.
+
+## 16. G10 addition — case memory / graph write-back (finalized)
+
+One schema addition, executed as a global schema change job (confirmed
+necessary: `HHG_InvestigationCase` is registered in TigerGraph's
+server-wide type catalog, so a graph-scoped `ALTER VERTEX` is rejected):
+`first_suspicious_txn_id UINT DEFAULT 0` on `HHG_InvestigationCase`,
+mirroring the existing `flagged_txn_id UINT` column exactly. No new
+vertex or edge type — `HHG_INVOLVES` (`InvestigationCase → Transaction`,
+declared Phase D, never loaded for InvestigationCase) and `HHG_CITES`
+(`InvestigationCase → ClosedCase`, declared Phase D, never loaded at
+all) are reused exactly as already declared, for `affected_txn_ids` and
+`similar_prior_cases` respectively.
+
+**Write path** (`src/investigation/case_memory.py`, the *only*
+write-capable TigerGraph function in this project — deliberately kept
+out of `queries.py`, whose own docstring promises every function there
+is read-only): four sequential, non-atomic steps via pyTigerGraph
+2.0.4's native `upsertVertex`/`upsertEdges` (signatures verified via
+`inspect.signature` against the installed package, not guessed) —
+vertex content attributes (`written_to_graph` explicitly `False`) →
+`HHG_INVOLVES` edges → `HHG_CITES` edges → a final, minimal vertex
+upsert flipping `written_to_graph` to `True`. Any failure at any step
+stops immediately and leaves `written_to_graph` `False`; there is no
+code path that reports success after a partial sequence. Both edge
+upserts use `vertexMustExist=True` — an id that doesn't already exist in
+the graph is rejected, never silently creating a phantom vertex.
+
+**Orchestration** (`src/agent/case_writer.py`): consumes only an already
+`ok: true` `case_output.investigate_and_assemble()` result, calls the
+new `write_case_memory` MCP tool (never TigerGraph directly), and never
+reads `g2_result` at all — locked decision: every reasoning-successful
+investigation is persisted regardless of what G2 recommends; case-memory
+persistence and action execution are unconditionally separate, and a
+successful write never triggers any of the 14 fraud-policy actions. The
+LLM has no path to this module — confirmed by structural (AST-based)
+tests that `reasoning.py`/`reasoning_validator.py` never import it.
+
+**Idempotency**: vertices update by primary ID (TigerGraph's own
+upsert-by-primary-id semantics, already relied on by the Phase D seed
+job); edges update by `(from, to)` pair (neither `HHG_INVOLVES` nor
+`HHG_CITES` declares a discriminator attribute). **Locked decision:
+edges are monotonic — a rerun with a smaller `affected_txn_ids`/
+`similar_prior_cases` set never deletes previously-written edges.**
+Graph lifecycle uses one new explicit value, `INVESTIGATED`, deliberately
+kept separate from the organizer's own `case.status` answer-file enum
+(`open`/`closed_fraud`/`closed_legitimate`/`escalated`) — no larger state
+machine invented. `graph_case_id` is `""` whenever `written_to_graph` is
+`False`.
+
+**Live-verified this phase** (real, previously-obtained HHG-003 Gemini
+result reused — zero new Gemini calls): a full write succeeded end to
+end (vertex attributes, 1 `HHG_INVOLVES` edge, 5 `HHG_CITES` edges, all
+read back and confirmed correct), then the identical write was repeated
+and confirmed idempotent — `HHG_InvestigationCase` vertex count stayed
+at 20, `HHG_INVOLVES` stayed at 1, `HHG_CITES` stayed at 5. `Transaction_
+Fraud` confirmed untouched throughout (18 vertex types, none `HHG_`
+-prefixed) both before and after the schema change and the write.
