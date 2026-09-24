@@ -29,6 +29,7 @@ import logging
 import re
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
 from src.benchmark.g9_runner import _build_call_llm, run_single_case
@@ -41,6 +42,20 @@ logger = logging.getLogger("fraud_investigation_api")
 _CASE_ID_PATTERN = re.compile(r"^HHG-(00[1-9]|01[0-9]|020)$")
 
 app = FastAPI(title="Fraud Investigation API", version="0.1.0")
+
+# CORS: allows the local Next.js dev server (http://localhost:3000) to
+# call this API from the browser. A specific origin only -- never "*" --
+# and only what the existing two routes actually need: GET (/health),
+# POST (/investigate), and the Content-Type header for the JSON request
+# body. Credentials stay disabled (the default) -- this API uses no
+# cookies/session auth, so there is nothing for the browser to send.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+)
 
 
 class InvestigateRequest(BaseModel):
