@@ -357,6 +357,183 @@ def test_next_best_actions_with_explicit_final_argument_differs_from_initial_onl
     assert actions["what_changed"] == "added ESCALATE_TO_ANALYST once the validated reasoning output (verdict/fraud_probability/pattern/exposure_usd) was available"
 
 
+def test_evidence_list_returns_empty_when_no_applicable_evidence_exists():
+    ledger = _base_ledger()  # default: recommendation_basis.reasons == [], pattern not matched, no R6
+    assert co._evidence_list(ledger, _base_g2_result()) == []
+
+
+def test_evidence_list_r5_behavior_unchanged():
+    ledger = _base_ledger(pattern_evidence={
+        "matched": True, "pattern": "card_testing",
+        "candidates": [{"authorization_txn_ids": [1, 2, 3], "larger_purchase_txn_id": 4}],
+        "uncertainty": [],
+    })
+    evidence = co._evidence_list(ledger, _base_g2_result())
+    assert len(evidence) == 1
+    assert evidence[0]["ref"] == "pattern:classify_card_testing"
+    assert evidence[0]["entity_ids"] == ["1", "2", "3", "4"]
+
+
+def test_evidence_list_r6_behavior_unchanged():
+    g2_result = _base_g2_result(recommended=[
+        {"action": "CREATE_CASE", "route": "auto", "reason": "R6: shared non-hub device/region evidence shows independently confirmed fraud on another card"},
+        {"action": "FILE_REPORT", "route": "L2", "reason": "R6: shared non-hub device/region evidence shows independently confirmed fraud on another card"},
+    ])
+    evidence = co._evidence_list(_base_ledger(), g2_result)
+    assert len(evidence) == 1  # one R6 citation, not one per action
+    assert evidence[0]["ref"] == "tool:cross_card_fraud_verification"
+    assert evidence[0]["entity_ids"] == []
+
+
+# --- G11-H: recommendation_basis-driven evidence ---
+
+def test_direct_confirmed_fraud_produces_evidence_with_real_case_id():
+    ledger = _base_ledger(recommendation_basis={"reasons": ["direct_confirmed_fraud"], "tool_call_orders": [1]})
+    evidence = co._evidence_list(ledger, _base_g2_result())
+    assert len(evidence) == 1
+    entry = evidence[0]
+    assert entry["source"] == "graph"
+    assert entry["ref"] == "g1:recommendation_basis"
+    assert entry["entity_ids"] == ["CC-1"]  # only the confirmed_fraud one -- CC-2 (cleared) is excluded
+
+
+def test_connected_confirmed_fraud_produces_evidence_with_real_case_id():
+    ledger = _base_ledger(
+        recommendation_basis={"reasons": ["connected_confirmed_fraud"], "tool_call_orders": [1]},
+        full_evidence={
+            "combined_evidence": {
+                **_base_ledger()["full_evidence"]["combined_evidence"],
+                "historical_cases": {
+                    "direct_cases": [],
+                    "connected_cases": [{"case_id": "CC-9", "outcome": "confirmed_fraud"}, {"case_id": "CC-8", "outcome": "cleared"}],
+                },
+            },
+            "cross_card_fraud_verification": None,
+        },
+    )
+    evidence = co._evidence_list(ledger, _base_g2_result())
+    assert len(evidence) == 1
+    assert evidence[0]["entity_ids"] == ["CC-9"]
+    assert "CC-8" not in evidence[0]["entity_ids"]
+
+
+def test_sibling_confirmed_fraud_produces_evidence_with_real_case_id_from_round2_tool_call():
+    ledger = _base_ledger(
+        recommendation_basis={"reasons": ["sibling_confirmed_fraud:C99999:1"], "tool_call_orders": [3]},
+        tool_calls=[{
+            "order": 3,
+            "tool": "historical_case_evidence",
+            "arguments": {"card_key": "C99999:1"},
+            "success": True,
+            "curated_result_summary": {
+                "direct_cases": [{"case_id": "CC-77", "outcome": "confirmed_fraud"}],
+                "connected_cases": [],
+            },
+        }],
+    )
+    evidence = co._evidence_list(ledger, _base_g2_result())
+    assert len(evidence) == 1
+    assert "C99999:1" in evidence[0]["claim"]
+    assert evidence[0]["entity_ids"] == ["CC-77"]
+
+
+def test_sibling_confirmed_fraud_with_trimmed_sample_shape_still_cites_available_ids():
+    # workflow.py's _trim() collapses a >5-entry list to {count, sample} --
+    # the sibling lookup must read whatever is actually available in
+    # "sample" rather than skip the whole entry.
+    ledger = _base_ledger(
+        recommendation_basis={"reasons": ["sibling_confirmed_fraud:C777:1"], "tool_call_orders": [3]},
+        tool_calls=[{
+            "order": 3,
+            "tool": "historical_case_evidence",
+            "arguments": {"card_key": "C777:1"},
+            "success": True,
+            "curated_result_summary": {
+                "direct_cases": {"count": 8, "sample": [{"case_id": "CC-1", "outcome": "confirmed_fraud"}]},
+                "connected_cases": [],
+            },
+        }],
+    )
+    evidence = co._evidence_list(ledger, _base_g2_result())
+    assert evidence[0]["entity_ids"] == ["CC-1"]
+
+
+def test_sibling_confirmed_fraud_with_missing_tool_call_result_cites_no_fabricated_ids():
+    # The reason references a card whose historical_case_evidence result
+    # isn't in tool_calls at all (e.g. trimmed away or never recorded) --
+    # must return [], never invent an id.
+    ledger = _base_ledger(recommendation_basis={"reasons": ["sibling_confirmed_fraud:C000:1"], "tool_call_orders": [3]})
+    evidence = co._evidence_list(ledger, _base_g2_result())
+    assert evidence[0]["entity_ids"] == []
+
+
+def test_narrow_device_evidence_produces_evidence_with_device_profile():
+    ledger = _base_ledger(
+        recommendation_basis={"reasons": ["narrow_device_evidence"], "tool_call_orders": []},
+        full_evidence={
+            "combined_evidence": {
+                **_base_ledger()["full_evidence"]["combined_evidence"],
+                "device_evidence": {"device_profile": "SAMSUNG SM-G892A", "hub_flag": False},
+            },
+            "cross_card_fraud_verification": None,
+        },
+    )
+    evidence = co._evidence_list(ledger, _base_g2_result())
+    assert len(evidence) == 1
+    assert evidence[0]["entity_ids"] == ["SAMSUNG SM-G892A"]
+
+
+def test_narrow_device_evidence_without_device_profile_cites_no_fabricated_id():
+    ledger = _base_ledger(recommendation_basis={"reasons": ["narrow_device_evidence"], "tool_call_orders": []})
+    # default fixture's device_evidence is None -- no device_profile to cite
+    evidence = co._evidence_list(ledger, _base_g2_result())
+    assert evidence[0]["entity_ids"] == []
+
+
+def test_multiple_recommendation_basis_reasons_produce_multiple_distinct_entries():
+    ledger = _base_ledger(recommendation_basis={
+        "reasons": ["direct_confirmed_fraud", "sibling_confirmed_fraud:C99999:1"],
+        "tool_call_orders": [1, 3],
+    }, tool_calls=[{
+        "order": 3, "tool": "historical_case_evidence", "arguments": {"card_key": "C99999:1"}, "success": True,
+        "curated_result_summary": {"direct_cases": [{"case_id": "CC-77", "outcome": "confirmed_fraud"}], "connected_cases": []},
+    }])
+    evidence = co._evidence_list(ledger, _base_g2_result())
+    assert len(evidence) == 2
+    assert evidence[0]["entity_ids"] == ["CC-1"]
+    assert evidence[1]["entity_ids"] == ["CC-77"]
+
+
+def test_duplicate_recommendation_basis_reason_does_not_produce_duplicate_entries():
+    ledger = _base_ledger(recommendation_basis={
+        "reasons": ["direct_confirmed_fraud", "direct_confirmed_fraud"], "tool_call_orders": [1],
+    })
+    evidence = co._evidence_list(ledger, _base_g2_result())
+    assert len(evidence) == 1
+
+
+def test_recommendation_basis_evidence_appended_after_existing_r5_and_r6_entries():
+    ledger = _base_ledger(
+        pattern_evidence={"matched": True, "pattern": "card_testing", "candidates": [{"authorization_txn_ids": [1], "larger_purchase_txn_id": 2}], "uncertainty": []},
+        recommendation_basis={"reasons": ["direct_confirmed_fraud"], "tool_call_orders": [1]},
+    )
+    g2_result = _base_g2_result(recommended=[
+        {"action": "CREATE_CASE", "route": "auto", "reason": "R6: shared non-hub device/region evidence shows independently confirmed fraud on another card"},
+    ])
+    evidence = co._evidence_list(ledger, g2_result)
+    assert len(evidence) == 3
+    assert evidence[0]["ref"] == "pattern:classify_card_testing"  # R5 first, unchanged position
+    assert evidence[1]["ref"] == "tool:cross_card_fraud_verification"  # R6 second, unchanged position
+    assert evidence[2]["ref"] == "g1:recommendation_basis"  # new entries appended last
+
+
+def test_no_new_evidence_when_recommendation_basis_reasons_are_unrecognized():
+    # Defensive: an unrecognized reason string (e.g. from a future G1
+    # change) must never crash this function or fabricate an entry.
+    ledger = _base_ledger(recommendation_basis={"reasons": ["some_future_reason"], "tool_call_orders": []})
+    assert co._evidence_list(ledger, _base_g2_result()) == []
+
+
 def test_next_best_actions_describes_removed_actions_too():
     # Constructed only to prove _describe_action_diff's "removed" branch --
     # g2_policy.evaluate itself never removes an action between passes (a

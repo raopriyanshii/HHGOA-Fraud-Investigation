@@ -110,11 +110,103 @@ def _next_best_actions(g2_result: dict, g2_result_final: dict | None = None) -> 
     return {"initial": initial, "final": final, "what_changed": _describe_action_diff(initial, final)}
 
 
+def _historical_case_ids(cases: list, outcome: str = "confirmed_fraud") -> list[str]:
+    return sorted({
+        c["case_id"] for c in cases
+        if isinstance(c, dict) and c.get("outcome") == outcome and c.get("case_id")
+    })
+
+
+def _sibling_confirmed_fraud_case_ids(ledger: dict, card_key: str) -> list[str]:
+    """The Round-2 historical_case_evidence result for this specific
+    card is never carried into full_evidence (see workflow.py) -- only
+    the ledger's own tool_calls list has it, and that list's
+    curated_result_summary already went through workflow.py's _trim(),
+    so a card with more than 5 direct/connected cases arrives here as
+    {"count": N, "sample": [...]} rather than a plain list. Reads
+    whichever shape is actually present and cites only what it contains
+    -- never invents an id beyond what was actually returned.
+    """
+    for tc in ledger.get("tool_calls", []):
+        if tc.get("tool") == "historical_case_evidence" and (tc.get("arguments") or {}).get("card_key") == card_key:
+            result = tc.get("curated_result_summary") or {}
+            ids: set[str] = set()
+            for key in ("direct_cases", "connected_cases"):
+                cases = result.get(key)
+                if isinstance(cases, dict):  # _trim()-collapsed {count, sample}
+                    cases = cases.get("sample")
+                for c in cases or []:
+                    if isinstance(c, dict) and c.get("outcome") == "confirmed_fraud" and c.get("case_id"):
+                        ids.add(c["case_id"])
+            return sorted(ids)
+    return []
+
+
+def _recommendation_basis_evidence(ledger: dict) -> list[dict]:
+    """G1's own recommendation_basis.reasons (src.agent.workflow._assess's
+    escalate/monitor determination) is entirely deterministic Python --
+    computed before this function is ever called, never LLM output.
+    Templated exactly like the existing R5/R6 entries below: the LLM
+    never controls whether these entries exist or what they cite.
+    Historical case IDs are read only from data the ledger already
+    carries (full_evidence.combined_evidence.historical_cases for the
+    flagged customer's own history; the ledger's tool_calls for a
+    sibling card's Round-2 result) -- nothing here performs a new graph
+    query, and no id is ever invented.
+    """
+    reasons = (ledger.get("recommendation_basis") or {}).get("reasons") or []
+    if not reasons:
+        return []
+
+    full_evidence = ledger.get("full_evidence") or {}
+    combined = full_evidence.get("combined_evidence") or {}
+    historical = combined.get("historical_cases") or {}
+    device = combined.get("device_evidence") or {}
+
+    evidence: list[dict] = []
+    seen_claims: set[str] = set()
+
+    def _add(claim: str, entity_ids: list[str]) -> None:
+        if claim in seen_claims:
+            return  # requirement 6: no duplicate entries for the same underlying evidence
+        seen_claims.add(claim)
+        evidence.append({"claim": claim, "source": "graph", "ref": "g1:recommendation_basis", "entity_ids": entity_ids})
+
+    for reason in reasons:
+        if reason == "direct_confirmed_fraud":
+            _add(
+                "G1 escalation basis: the customer's own historical case record includes at least one confirmed-fraud case",
+                _historical_case_ids(historical.get("direct_cases") or []),
+            )
+        elif reason == "connected_confirmed_fraud":
+            _add(
+                "G1 escalation basis: a case connected to this customer's history includes at least one confirmed-fraud case",
+                _historical_case_ids(historical.get("connected_cases") or []),
+            )
+        elif reason.startswith("sibling_confirmed_fraud:"):
+            card_key = reason.split(":", 1)[1]
+            _add(
+                f"G1 escalation basis: card {card_key}, connected via shared closed-case history, has at least one confirmed-fraud case",
+                _sibling_confirmed_fraud_case_ids(ledger, card_key),
+            )
+        elif reason == "narrow_device_evidence":
+            device_profile = device.get("device_profile")
+            _add(
+                "G1 monitoring basis: the flagged transaction's device profile is not shared/hub (narrow device evidence)",
+                [device_profile] if device_profile else [],
+            )
+
+    return evidence
+
+
 def _evidence_list(ledger: dict, g2_result: dict) -> list[dict]:
     """Deterministically templated (no LLM), mirroring the organizer's
-    `evidence` shape ({claim, source, ref, entity_ids}). Only covers the
-    deterministic findings this project currently establishes (R5/R6) --
-    does not attempt to restate every raw evidence field as a claim.
+    `evidence` shape ({claim, source, ref, entity_ids}). Covers the
+    deterministic findings this project establishes: R5 (card-testing),
+    R6 (cross-card fraud verification), and G1's own recommendation_basis
+    reasons (direct/connected/sibling confirmed fraud, narrow device
+    evidence) -- does not attempt to restate every raw evidence field as
+    a claim.
     """
     evidence: list[dict] = []
     pattern_evidence = ledger.get("pattern_evidence") or {}
@@ -142,6 +234,7 @@ def _evidence_list(ledger: dict, g2_result: dict) -> list[dict]:
                 "entity_ids": [],
             })
             break  # one R6 citation is enough -- all three actions share the same underlying evidence
+    evidence.extend(_recommendation_basis_evidence(ledger))
     return evidence
 
 
