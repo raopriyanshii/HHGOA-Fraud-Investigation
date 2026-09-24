@@ -382,7 +382,125 @@ def test_evidence_list_r6_behavior_unchanged():
     evidence = co._evidence_list(_base_ledger(), g2_result)
     assert len(evidence) == 1  # one R6 citation, not one per action
     assert evidence[0]["ref"] == "tool:cross_card_fraud_verification"
+    assert evidence[0]["entity_ids"] == []  # no Q9 data in the default fixture -- nothing to cite
+
+
+_R6_G2_RESULT = _base_g2_result(recommended=[
+    {"action": "CREATE_CASE", "route": "auto", "reason": "R6: shared non-hub device/region evidence shows independently confirmed fraud on another card"},
+])
+
+
+def _ledger_with_cross_card(cross_card: dict) -> dict:
+    return _base_ledger(full_evidence={
+        "combined_evidence": _base_ledger()["full_evidence"]["combined_evidence"],
+        "cross_card_fraud_verification": cross_card,
+    })
+
+
+# --- G11-I: R6 evidence entity_ids populated from Q9's real result ---
+
+def test_r6_via_device_confirmed_fraud_cites_real_card_key_and_case_ids():
+    ledger = _ledger_with_cross_card({
+        "via_device": {"other_cards": [
+            {"card_key": "C99999:1", "customer_id": "C99999", "same_customer": False, "has_confirmed_fraud": True, "confirmed_fraud_case_ids": ["CC-9"]},
+        ]},
+        "via_region": None,
+    })
+    evidence = co._evidence_list(ledger, _R6_G2_RESULT)
+    assert evidence[0]["entity_ids"] == ["C99999:1", "CC-9"]
+
+
+def test_r6_via_region_confirmed_fraud_cites_real_card_key_and_case_ids():
+    ledger = _ledger_with_cross_card({
+        "via_device": None,
+        "via_region": {"other_cards": [
+            {"card_key": "C88888:2", "customer_id": "C88888", "same_customer": False, "has_confirmed_fraud": True, "confirmed_fraud_case_ids": ["CC-5"]},
+        ]},
+    })
+    evidence = co._evidence_list(ledger, _R6_G2_RESULT)
+    assert evidence[0]["entity_ids"] == ["C88888:2", "CC-5"]
+
+
+def test_r6_overlapping_ids_across_paths_are_deduplicated_and_sorted():
+    ledger = _ledger_with_cross_card({
+        "via_device": {"other_cards": [
+            {"card_key": "C99999:1", "customer_id": "C99999", "same_customer": False, "has_confirmed_fraud": True, "confirmed_fraud_case_ids": ["CC-9"]},
+        ]},
+        "via_region": {"other_cards": [
+            {"card_key": "C99999:1", "customer_id": "C99999", "same_customer": False, "has_confirmed_fraud": True, "confirmed_fraud_case_ids": ["CC-9", "CC-2"]},
+        ]},
+    })
+    evidence = co._evidence_list(ledger, _R6_G2_RESULT)
+    assert evidence[0]["entity_ids"] == ["C99999:1", "CC-2", "CC-9"]  # deduplicated, sorted
+
+
+def test_r6_no_confirmed_fraud_entries_cites_no_ids():
+    ledger = _ledger_with_cross_card({
+        "via_device": {"other_cards": [
+            {"card_key": "C77777:1", "customer_id": "C77777", "same_customer": False, "has_confirmed_fraud": False, "confirmed_fraud_case_ids": []},
+        ]},
+        "via_region": None,
+    })
+    evidence = co._evidence_list(ledger, _R6_G2_RESULT)
     assert evidence[0]["entity_ids"] == []
+
+
+def test_r6_missing_q9_result_cites_no_ids():
+    ledger = _ledger_with_cross_card(None)
+    evidence = co._evidence_list(ledger, _R6_G2_RESULT)
+    assert evidence[0]["entity_ids"] == []
+
+
+def test_r6_trimmed_sample_shape_still_cites_available_ids():
+    ledger = _ledger_with_cross_card({
+        "via_device": {"other_cards": {"count": 800, "sample": [
+            {"card_key": "C11111:1", "customer_id": "C11111", "same_customer": False, "has_confirmed_fraud": True, "confirmed_fraud_case_ids": ["CC-3"]},
+        ]}},
+        "via_region": None,
+    })
+    evidence = co._evidence_list(ledger, _R6_G2_RESULT)
+    assert evidence[0]["entity_ids"] == ["C11111:1", "CC-3"]
+
+
+def test_r6_customer_id_never_included_in_entity_ids():
+    ledger = _ledger_with_cross_card({
+        "via_device": {"other_cards": [
+            {"card_key": "C99999:1", "customer_id": "C99999", "same_customer": False, "has_confirmed_fraud": True, "confirmed_fraud_case_ids": []},
+        ]},
+        "via_region": None,
+    })
+    evidence = co._evidence_list(ledger, _R6_G2_RESULT)
+    assert "C99999" not in evidence[0]["entity_ids"]  # bare customer_id never cited
+
+
+def test_r6_claim_and_ref_unchanged_when_entity_ids_are_populated():
+    ledger = _ledger_with_cross_card({
+        "via_device": {"other_cards": [
+            {"card_key": "C99999:1", "customer_id": "C99999", "same_customer": False, "has_confirmed_fraud": True, "confirmed_fraud_case_ids": ["CC-9"]},
+        ]},
+        "via_region": None,
+    })
+    evidence = co._evidence_list(ledger, _R6_G2_RESULT)
+    assert evidence[0]["claim"] == _R6_G2_RESULT["recommended"][0]["reason"]
+    assert evidence[0]["ref"] == "tool:cross_card_fraud_verification"
+    assert evidence[0]["source"] == "graph"
+
+
+def test_r5_and_recommendation_basis_ordering_unaffected_by_r6_entity_id_change():
+    ledger = _ledger_with_cross_card({
+        "via_device": {"other_cards": [
+            {"card_key": "C99999:1", "customer_id": "C99999", "same_customer": False, "has_confirmed_fraud": True, "confirmed_fraud_case_ids": ["CC-9"]},
+        ]},
+        "via_region": None,
+    })
+    ledger["pattern_evidence"] = {"matched": True, "pattern": "card_testing", "candidates": [{"authorization_txn_ids": [1], "larger_purchase_txn_id": 2}], "uncertainty": []}
+    ledger["recommendation_basis"] = {"reasons": ["direct_confirmed_fraud"], "tool_call_orders": [1]}
+    evidence = co._evidence_list(ledger, _R6_G2_RESULT)
+    assert len(evidence) == 3
+    assert evidence[0]["ref"] == "pattern:classify_card_testing"
+    assert evidence[1]["ref"] == "tool:cross_card_fraud_verification"
+    assert evidence[1]["entity_ids"] == ["C99999:1", "CC-9"]
+    assert evidence[2]["ref"] == "g1:recommendation_basis"
 
 
 # --- G11-H: recommendation_basis-driven evidence ---

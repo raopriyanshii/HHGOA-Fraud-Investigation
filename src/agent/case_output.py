@@ -199,6 +199,44 @@ def _recommendation_basis_evidence(ledger: dict) -> list[dict]:
     return evidence
 
 
+def _q9_r6_entity_ids(ledger: dict) -> list[str]:
+    """Real entity_ids for the R6 evidence entry below, read from Q9's
+    own untrimmed result (ledger["full_evidence"]["cross_card_fraud_
+    verification"] -- see workflow.py, never _trim()-collapsed there).
+    Both card_key and confirmed_fraud_case_ids are included for every
+    other_cards entry with has_confirmed_fraud == True, from both
+    via_device and via_region -- both are real graph entities/records
+    Q9 already returned, never invented, never customer_id. Deduplicated
+    and sorted for a deterministic result. Handles the {"count": N,
+    "sample": [...]} trimmed shape defensively (matching every other
+    other_cards reader in this project, e.g. g2_policy._r6_evidence_
+    present) even though this particular value is not expected to be
+    trimmed; returns [] for anything missing, None, or malformed --
+    never raises, never performs a graph query.
+    """
+    cross_card = (ledger.get("full_evidence") or {}).get("cross_card_fraud_verification")
+    if not isinstance(cross_card, dict):
+        return []
+
+    ids: set[str] = set()
+    for path in ("via_device", "via_region"):
+        path_result = cross_card.get(path)
+        if not isinstance(path_result, dict):
+            continue
+        other_cards = path_result.get("other_cards")
+        if isinstance(other_cards, dict):  # _trim()-collapsed {count, sample}
+            other_cards = other_cards.get("sample")
+        for entry in other_cards or []:
+            if not (isinstance(entry, dict) and entry.get("has_confirmed_fraud")):
+                continue
+            if entry.get("card_key"):
+                ids.add(entry["card_key"])
+            for case_id in entry.get("confirmed_fraud_case_ids") or []:
+                ids.add(case_id)
+
+    return sorted(ids)
+
+
 def _evidence_list(ledger: dict, g2_result: dict) -> list[dict]:
     """Deterministically templated (no LLM), mirroring the organizer's
     `evidence` shape ({claim, source, ref, entity_ids}). Covers the
@@ -231,7 +269,7 @@ def _evidence_list(ledger: dict, g2_result: dict) -> list[dict]:
                 "claim": entry["reason"],
                 "source": "graph",
                 "ref": "tool:cross_card_fraud_verification",
-                "entity_ids": [],
+                "entity_ids": _q9_r6_entity_ids(ledger),
             })
             break  # one R6 citation is enough -- all three actions share the same underlying evidence
     evidence.extend(_recommendation_basis_evidence(ledger))
